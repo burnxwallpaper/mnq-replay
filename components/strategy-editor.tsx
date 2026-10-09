@@ -56,14 +56,31 @@ export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
   const gutterRef = useRef<HTMLPreElement>(null);
   const onRunRef = useRef(onRun);
   const scriptRef = useRef(script);
-  const loadedRef = useRef(false);
+  const skipPersistRef = useRef(true);
+  const [appliedSource, setAppliedSource] = useState<string | null>(null);
   onRunRef.current = onRun;
   scriptRef.current = script;
+
+  function publish(source: string) {
+    const run = runStrategyScript(FIXTURE_BARS, source);
+    setAppliedSource(source);
+    if (run.ok) {
+      const closed = run.trades.filter((trade) => trade.exitIndex !== null).length;
+      const trades = run.trades.length === 1 ? "1 trade" : `${run.trades.length} trades`;
+      setStatus(
+        `Full period applied. ${trades}, ${closed} closed. Entries and exits are on the chart.`,
+      );
+    } else {
+      setStatus(run.error);
+    }
+    onRunRef.current(run);
+  }
 
   useEffect(() => {
     const apply = (next: string) => {
       scriptRef.current = next;
       setScript(next);
+      publish(next);
     };
 
     const api: StrategyApi = {
@@ -99,32 +116,24 @@ export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
   }, []);
 
   useEffect(() => {
-    let next = script;
-    if (!loadedRef.current) {
-      loadedRef.current = true;
-      const hashed = scriptFromHash();
-      const stored = readStoredScript();
-      next = hashed ?? stored ?? DEFAULT_STRATEGY_SCRIPT;
-      if (hashed) {
-        writeStoredScript(hashed);
-        window.history.replaceState(null, "", window.location.pathname + window.location.search);
-      }
-      if (next !== script) {
-        setScript(next);
-        return;
-      }
+    const hashed = scriptFromHash();
+    const stored = readStoredScript();
+    const next = hashed ?? stored ?? DEFAULT_STRATEGY_SCRIPT;
+    if (hashed) {
+      writeStoredScript(hashed);
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }
+    scriptRef.current = next;
+    setScript(next);
+    publish(next);
+  }, []);
 
-    writeStoredScript(next);
-    const run = runStrategyScript(FIXTURE_BARS, next);
-    if (run.ok) {
-      const closed = run.trades.filter((trade) => trade.exitIndex !== null).length;
-      const trades = run.trades.length === 1 ? "1 trade" : `${run.trades.length} trades`;
-      setStatus(`Applied in this browser. ${trades}, ${closed} closed. No redeploy.`);
-    } else {
-      setStatus(run.error);
+  useEffect(() => {
+    if (skipPersistRef.current) {
+      skipPersistRef.current = false;
+      return;
     }
-    onRunRef.current(run);
+    writeStoredScript(script);
   }, [script]);
 
   const lineCount = Math.max(1, script.split("\n").length);
@@ -144,14 +153,23 @@ export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
             without a redeploy.
           </p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => setScript(DEFAULT_STRATEGY_SCRIPT)}
-        >
-          Reset
-        </Button>
+        <div className="flex gap-2">
+          <Button type="button" size="sm" onClick={() => publish(scriptRef.current)}>
+            Apply strategy
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              scriptRef.current = DEFAULT_STRATEGY_SCRIPT;
+              setScript(DEFAULT_STRATEGY_SCRIPT);
+              publish(DEFAULT_STRATEGY_SCRIPT);
+            }}
+          >
+            Reset
+          </Button>
+        </div>
       </div>
       <div className="grid grid-cols-[2.5rem_minmax(0,1fr)] overflow-hidden rounded-md bg-black/50 ring-1 ring-foreground/10">
         <pre
@@ -180,7 +198,9 @@ export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
         role="status"
         className="mt-2 font-mono text-xs text-muted-foreground"
       >
-        {status}
+        {appliedSource !== null && script !== appliedSource
+          ? "Draft changed. Apply strategy to refresh the full-period backtest."
+          : status}
       </p>
     </section>
   );

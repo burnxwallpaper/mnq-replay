@@ -32,6 +32,7 @@ export function ReplayWorkspace() {
   const [index, setIndex] = useState(START_INDEX);
   const [playing, setPlaying] = useState(false);
   const [scriptRun, setScriptRun] = useState<ScriptRun | null>(null);
+  const [fitRevision, setFitRevision] = useState(0);
   const lastIndex = FIXTURE_BARS.length - 1;
   const toggleRef = useRef<() => void>(() => {});
 
@@ -85,17 +86,22 @@ export function ReplayWorkspace() {
   }
 
   const cursor = FIXTURE_BARS[index];
+  const periodEnd = FIXTURE_BARS.length - 1;
   const score = useMemo(() => {
     if (!scriptRun?.ok) return null;
-    return scoreScript(scriptRun.trades, FIXTURE_BARS, index);
-  }, [scriptRun, index]);
-  const visibleMarkers = (scriptRun?.ok ? scriptRun.markers : [])
-    .filter((marker) => marker.visibleFromIndex <= index)
-    .map((marker) => ({
-      ...marker,
-      strategyId: "script",
-      localIndex: marker.barIndex,
-    }));
+    return scoreScript(scriptRun.trades, FIXTURE_BARS, periodEnd);
+  }, [scriptRun, periodEnd]);
+  const chartMarkers = (scriptRun?.ok ? scriptRun.markers : []).map((marker) => ({
+    ...marker,
+    strategyId: "script",
+    localIndex: marker.barIndex,
+  }));
+  const entryCount = chartMarkers.filter((marker) => marker.kind === "entry").length;
+  const exitCount = chartMarkers.filter((marker) => marker.kind === "exit").length;
+  const tradeCount = scriptRun?.ok ? scriptRun.trades.length : 0;
+  const tradeLabel = tradeCount === 1 ? "1 trade" : `${tradeCount} trades`;
+  const entryLabel = entryCount === 1 ? "1 entry" : `${entryCount} entries`;
+  const exitLabel = exitCount === 1 ? "1 exit" : `${exitCount} exits`;
   const cursorLabel = formatFixtureTime(cursor.ts);
   const fields = [
     ["O", formatFixturePrice(cursor.o)],
@@ -127,6 +133,14 @@ export function ReplayWorkspace() {
         <p className="font-mono text-sm text-foreground">{cursorLabel}</p>
       </header>
 
+      <p id="backtest-summary" className="font-mono text-sm">
+        {score
+          ? `Full period · ${tradeLabel} · ${formatR(score.totalR)} · ${formatPnl(score.totalPnl)} · ${score.wins} wins · ${score.losses} losses · ${entryLabel} · ${exitLabel}`
+          : scriptRun && !scriptRun.ok
+            ? scriptRun.error
+            : "Full period backtest appears after Apply strategy."}
+      </p>
+
       <p className="sr-only" role="status">
         {playing ? "Playing" : "Paused"} at {cursorLabel}, bar {index + 1} of{" "}
         {FIXTURE_BARS.length}.
@@ -145,8 +159,9 @@ export function ReplayWorkspace() {
           </div>
           <CandleChart
             bars={FIXTURE_BARS}
-            markers={visibleMarkers}
+            markers={chartMarkers}
             cursorIndex={index}
+            fitRevision={fitRevision}
           />
         </section>
 
@@ -181,10 +196,14 @@ export function ReplayWorkspace() {
             <Separator />
             <div className="flex flex-col gap-2">
               <p className="text-xs tracking-wide text-muted-foreground uppercase">
-                Script at cursor
+                Full period
               </p>
               {score ? (
                 <dl className="flex flex-col gap-1 font-mono text-xs">
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">Trades</dt>
+                    <dd>{tradeCount}</dd>
+                  </div>
                   <div className="flex justify-between gap-3">
                     <dt className="text-muted-foreground">Total R</dt>
                     <dd>{formatR(score.totalR)}</dd>
@@ -233,13 +252,19 @@ export function ReplayWorkspace() {
         onJump={scrub}
       />
 
-      <StrategyEditor onRun={setScriptRun} />
+      <StrategyEditor
+        onRun={(run) => {
+          setScriptRun(run);
+          if (run.ok) setFitRevision((current) => current + 1);
+        }}
+      />
 
       <p className="text-xs text-muted-foreground">
-        Space plays and pauses outside the editor. Drag the chart to pan, and
-        drag the price scale to zoom. Dates and times are on the bottom axis.
-        Volume is the histogram underneath. Script markers show after the
-        cursor reaches them. Script edits stay in this browser.
+        Apply strategy draws entries and exits for the whole loaded series and
+        totals PnL, R, and trade count for that period. Replay only moves the
+        cursor. Drag the chart to pan, and drag the price scale to zoom.
+        Dates and times are on the bottom axis. Volume is the histogram
+        underneath. Script edits stay in this browser.
       </p>
     </main>
   );

@@ -48,10 +48,12 @@ export function CandleChart({
   bars,
   markers = [],
   cursorIndex = null,
+  fitRevision = 0,
 }: {
   bars: FixtureBar[];
   markers?: (ChartMarker & { localIndex: number })[];
   cursorIndex?: number | null;
+  fitRevision?: number;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -184,6 +186,15 @@ export function CandleChart({
       to: bars.length + 3,
     });
   }, [bars]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || fitRevision === 0 || bars.length === 0) return;
+    chart.timeScale().setVisibleLogicalRange({
+      from: -1,
+      to: bars.length + 2,
+    });
+  }, [fitRevision, bars.length]);
 
   useEffect(() => {
     const candles = candleRef.current;
