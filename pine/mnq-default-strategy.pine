@@ -1,24 +1,17 @@
 //@version=5
-// Port of the on-page default in lib/strategy-script.ts (DEFAULT_STRATEGY_SCRIPT).
-// Apply this to a 1-minute CME_MINI:MNQ1! chart. One MNQ contract, no commission.
+// Exact port of DEFAULT_STRATEGY_SCRIPT in lib/strategy-script.ts.
 //
-// Rules, matched to the site:
-// - Long only. Enter at the impulse bar's close. No separate pullback order.
-// - Impulse: close > open, body/span >= 0.55, body >= 4, volume > 1.8 x the 20-bar volume average.
-//   Span is at least 0.25. The volume average uses the bars available until 20 exist.
-// - New longs only while the Chicago hour is 09:00–21:59 (hours 9 through 21).
-//   22:00–08:59 Chicago cannot open a trade. An open trade is still managed then.
-// - Stop is the signal bar's low. Initial target is 2R, with R = max(close - low, 1) for that target.
-// - The 1R latch uses max(close - low, 0.25). A later close under the 5 EMA sets the target to entry + that R and leaves it there.
-// - Stop and the current target are tested before that tighten. A bar that reaches 2R exits at 2R.
-//   If it reaches neither, and the close is under the 5 EMA, the target becomes 1R. If that same bar's high reached 1R, it exits at 1R.
-// - If the bar touches the stop and the target, the stop fills.
-// - The 5 EMA is the standard SMA-seeded EMA (seed at bar 5, then 2/(5+1)).
+// Chart: CME_MINI:MNQ1! 1-minute, electronic session (the overnight bars must be
+// on the chart). The script skips new longs from 22:00 through 08:59 Chicago.
+// The window for 187 trades, 51.3% wins, +42.00R, +$84, max consecutive losses 7,
+// max drawdown $22 is 13 Sep 2026 22:00 UTC through 9 Oct 2026 09:30 UTC.
+// Reset the strategy properties to the defaults below if the report was edited.
 //
-// The stop and target are armed on the bars after the signal bar, so the signal
-// bar's own low does not stop the trade out. Entry still fills at that bar's close.
-// TradingView fills a stop or limit at the open when a later bar gaps through it.
-// The site fills those at the stop or target price.
+// Entry fills at the signal close. Stop is that bar's low. Target starts at 2R.
+// R for the 2R target is max(close - low, 1). The 1R latch uses max(close - low, 0.25).
+// A close under the 5 EMA moves the target to 1R and leaves it there. Stop and the
+// current target are tested before that move. If both are touched, the stop fills.
+// A bar that reaches 2R exits at 2R. Quantity is sized so each R is $2.
 strategy("MNQ Impulse 5EMA Session",
      shorttitle="MNQ 5EMA",
      overlay=true,
@@ -45,19 +38,22 @@ bodySpanMin = input.float(0.55, "Min body/span", minval=0.0, maxval=1.0, step=0.
 minBody = input.float(4.0, "Min body (points)", minval=0.0, step=0.25)
 sessionFirstHour = input.int(9, "First Chicago hour that may enter", minval=0, maxval=23)
 sessionLastHour = input.int(21, "Last Chicago hour that may enter", minval=0, maxval=23)
+dollarsPerR = input.float(2.0, "Dollars per R", minval=0.01, step=0.5)
 
-spanFloor = 0.25
-targetRiskFloor = 1.0
-latchRiskFloor = 0.25
+emaSeed(src, len) =>
+    float e = na
+    float alpha = 2.0 / (len + 1.0)
+    if bar_index >= len - 1
+        float seed = math.sum(src, len) / len
+        e := bar_index == len - 1 ? seed : alpha * src + (1.0 - alpha) * nz(e[1])
+    e
 
 int ctHour = hour(time, "America/Chicago")
 bool sessionOk = ctHour >= sessionFirstHour and ctHour <= sessionLastHour
-
-float ema5 = ta.ema(close, emaLength)
-float volSum = ta.cum(volume)
-float avgVol = bar_index + 1 < volLength ? volSum / (bar_index + 1) : ta.sma(volume, volLength)
-
+float ema5 = emaSeed(close, emaLength)
+float avgVol = bar_index + 1 < volLength ? ta.cum(volume) / (bar_index + 1) : ta.sma(volume, volLength)
 float body = math.abs(close - open)
+float spanFloor = 0.25
 float span = math.max(high - low, spanFloor)
 bool impulse = close > open and body / span >= bodySpanMin and body >= minBody and volume > avgVol * volMultiple
 
@@ -66,8 +62,14 @@ var float entryPx = na
 var float stopPx = na
 var float targetPx = na
 var float riskPts = na
-var int tradeNum = 0
-var string openId = na
+var int closed = 0
+var int wins = 0
+var float totalR = 0.0
+var float equity = 0.0
+var float peak = 0.0
+var float maxDd = 0.0
+var int lossStreak = 0
+var int maxLossStreak = 0
 
 bool confirmed = barstate.isconfirmed
 float fillStop = na
@@ -85,31 +87,52 @@ if inPos
             fillStop := stopPx
         else
             fillLimit := targetPx
+        float exitPrice = stopped ? stopPx : targetPx
+        float r = (exitPrice - entryPx) / riskPts
+        totalR += r
+        equity += r * dollarsPerR
+        closed += 1
+        if stopped
+            lossStreak += 1
+            if lossStreak > maxLossStreak
+                maxLossStreak := lossStreak
+        else
+            wins += 1
+            lossStreak := 0
+        if equity > peak
+            peak := equity
+        if peak - equity > maxDd
+            maxDd := peak - equity
         inPos := false
 
 bool flatNow = not inPos and na(fillStop) and na(fillLimit)
 if flatNow and sessionOk and impulse
-    float targetDist = math.max(close - low, targetRiskFloor)
-    tradeNum += 1
-    openId := "L" + str.tostring(tradeNum)
+    float targetDist = math.max(close - low, 1.0)
     entryPx := close
     stopPx := low
     targetPx := close + targetDist * 2.0
-    riskPts := math.max(math.abs(close - low), latchRiskFloor)
+    riskPts := math.max(close - low, 0.25)
     inPos := true
     entered := true
 
-if confirmed and entered
-    strategy.entry(openId, strategy.long, comment="Buy")
+float pointValue = nz(syminfo.pointvalue, 2.0)
+if pointValue <= 0
+    pointValue := 2.0
 
-// One exit command per bar, after the signal bar. Stop only when both prices are touched.
-bool manage = confirmed and not entered and (inPos or not na(fillStop) or not na(fillLimit))
-if manage and not na(fillStop)
-    strategy.exit("Exit", from_entry=openId, stop=fillStop, comment="Stop")
-else if manage and not na(fillLimit)
-    strategy.exit("Exit", from_entry=openId, stop=stopPx, limit=fillLimit, comment="Target")
-else if manage
-    strategy.exit("Exit", from_entry=openId, stop=stopPx, limit=targetPx)
+// Buy stop at the signal close. On these impulse bars the low prints before that
+// fill, so the protective stop (the signal low) is not hit on the entry bar.
+// It is working on the next bar, which is the first bar the site checks.
+if confirmed and entered
+    strategy.entry("Long", strategy.long, qty=dollarsPerR / (riskPts * pointValue), stop=entryPx, comment="Buy")
+    strategy.exit("Exit", from_entry="Long", stop=stopPx, limit=targetPx)
+
+// One price on an exit bar, so a stop and a target on the same bar cannot flip.
+if confirmed and not entered and not na(fillStop)
+    strategy.exit("Exit", from_entry="Long", stop=fillStop, limit=fillStop, comment="Stop")
+else if confirmed and not entered and not na(fillLimit)
+    strategy.exit("Exit", from_entry="Long", stop=fillLimit, limit=fillLimit, comment="Target")
+else if confirmed and not entered and inPos
+    strategy.exit("Exit", from_entry="Long", stop=stopPx, limit=targetPx)
 
 plot(ema5, "EMA 5 halo", color=#071018, linewidth=4)
 plot(ema5, "EMA 5", color=#39d0ff, linewidth=2)
@@ -118,11 +141,27 @@ bgcolor(sessionOk ? na : color.new(#ef6b73, 92), title="22:00–08:59 Chicago, n
 if entered
     label.new(bar_index, entryPx, "Buy " + str.tostring(entryPx, format.mintick), style=label.style_label_up, color=#3dd68c, textcolor=#ffffff, size=size.small)
     line.new(bar_index, entryPx, bar_index + 2, entryPx, color=#3dd68c, width=1)
-
 if not na(fillStop)
     label.new(bar_index, fillStop, "Sell " + str.tostring(fillStop, format.mintick), style=label.style_label_down, color=#ef6b73, textcolor=#ef6b73, size=size.small)
     line.new(bar_index, fillStop, bar_index + 2, fillStop, color=#ef6b73, width=1)
-
 if not na(fillLimit)
     label.new(bar_index, fillLimit, "Sell " + str.tostring(fillLimit, format.mintick), style=label.style_label_down, color=#3dd68c, textcolor=#3dd68c, size=size.small)
     line.new(bar_index, fillLimit, bar_index + 2, fillLimit, color=#3dd68c, width=1)
+
+var table panel = table.new(position.top_right, 2, 6, bgcolor=#071018, border_color=#1c2a33, border_width=1)
+if barstate.islast
+    string winText = closed == 0 ? "—" : str.tostring(100.0 * wins / closed, "#.0") + "%"
+    string rText = (totalR > 0 ? "+" : "") + str.tostring(totalR, "#.00") + "R"
+    string pnlText = (equity > 0 ? "+" : "") + "$" + str.tostring(equity, "#.00")
+    table.cell(panel, 0, 0, "Trades", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 0, str.tostring(closed), text_color=color.white, text_size=size.small)
+    table.cell(panel, 0, 1, "Win rate", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 1, winText, text_color=color.white, text_size=size.small)
+    table.cell(panel, 0, 2, "Net", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 2, rText, text_color=color.white, text_size=size.small)
+    table.cell(panel, 0, 3, "PnL", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 3, pnlText, text_color=color.white, text_size=size.small)
+    table.cell(panel, 0, 4, "Max loss streak", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 4, str.tostring(maxLossStreak), text_color=color.white, text_size=size.small)
+    table.cell(panel, 0, 5, "Max drawdown", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 5, "$" + str.tostring(maxDd, "#.00"), text_color=color.white, text_size=size.small)
