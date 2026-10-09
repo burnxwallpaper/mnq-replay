@@ -9,12 +9,13 @@ import {
   type IChartApi,
   type ISeriesApi,
   type LineData,
+  type MouseEventParams,
   type SeriesMarker,
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
 import { ema } from "@/lib/ema";
-import { formatFixturePrice, type FixtureBar } from "@/lib/fixture-bars";
+import { formatFixturePrice, formatFixtureTime, type FixtureBar } from "@/lib/fixture-bars";
 import type { ChartMarker } from "@/lib/strategies/types";
 
 const UP = "#3dd68c";
@@ -81,6 +82,7 @@ export function CandleChart({
   const [span, setSpan] = useState("—");
   const [scale, setScale] = useState("—");
   const [callouts, setCallouts] = useState<TradeCallout[]>([]);
+  const [copyNote, setCopyNote] = useState("");
   const markersRef = useRef(markers);
   const barsRef = useRef(bars);
   const calloutSigRef = useRef("");
@@ -234,12 +236,42 @@ export function CandleChart({
       placeRef.current();
     };
 
+    const copyTimer = { id: 0 };
+    const onChartClick = (param: MouseEventParams) => {
+      if (!param.point || param.logical == null) return;
+      const index = Math.round(Number(param.logical));
+      const bar = barsRef.current[index];
+      if (!bar) return;
+      const yPrice = candles.coordinateToPrice(param.point.y);
+      const lines = [
+        formatFixtureTime(bar.ts),
+        `O ${formatFixturePrice(bar.o)}`,
+        `H ${formatFixturePrice(bar.h)}`,
+        `L ${formatFixturePrice(bar.l)}`,
+        `C ${formatFixturePrice(bar.c)}`,
+        `V ${bar.v.toLocaleString("en-US")}`,
+      ];
+      if (yPrice != null) lines.push(`Price ${formatFixturePrice(Number(yPrice))}`);
+      const text = lines.join("\n");
+      void navigator.clipboard.writeText(text).then(
+        () => {
+          setCopyNote("Copied");
+          window.clearTimeout(copyTimer.id);
+          copyTimer.id = window.setTimeout(() => setCopyNote(""), 1600);
+        },
+        () => setCopyNote("Copy failed"),
+      );
+    };
+
+    chart.subscribeClick(onChartClick);
     chart.timeScale().subscribeVisibleLogicalRangeChange(readScales);
     frame.addEventListener("pointermove", readScales);
     frame.addEventListener("pointerup", readScales);
     frame.addEventListener("wheel", readScales, { passive: true });
 
     return () => {
+      window.clearTimeout(copyTimer.id);
+      chart.unsubscribeClick(onChartClick);
       frame.removeEventListener("pointermove", readScales);
       frame.removeEventListener("pointerup", readScales);
       frame.removeEventListener("wheel", readScales);
@@ -380,6 +412,7 @@ export function CandleChart({
         <div id="chart-time">{span}</div>
         <div id="chart-price">Price {scale}</div>
         <div className="text-[#9aa8b8]">Volume</div>
+        <div id="chart-copy">{copyNote}</div>
       </div>
     </div>
   );
