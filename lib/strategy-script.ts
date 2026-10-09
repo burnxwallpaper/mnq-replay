@@ -1,8 +1,10 @@
+import { ema } from "@/lib/ema";
 import type { OhlcvBar } from "@/lib/strategies/types";
 
 export const STRATEGY_STORAGE_KEY = "mnq-replay.strategyScript";
 
-export const DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
+/** Previous on-page default, so a saved copy of it upgrades to the EMA exit. */
+export const LEGACY_DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
 // bar: { ts, o, h, l, c, v }
 // ta.sma(i, length, "o" | "h" | "l" | "c" | "v")
 // Return { signal: true, side: "long" | "short", stop, target } or null.
@@ -12,6 +14,29 @@ const avgVol = ta.sma(i, 20, "v")
 const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
 if (bar.c > bar.o && body / span >= 0.55 && body >= 4 && bar.v > avgVol * 1.8) {
+  const risk = Math.max(bar.c - bar.l, 1)
+  return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * 2 }
+}
+return null
+`;
+
+export const DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
+// bar: { ts, o, h, l, c, v }
+// ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
+// position: null, or { side, entry, stop, target, risk } while a trade is open
+// Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
+// Entry fills at the signal close. One position at a time.
+// Impulse entries still target 2R. A close below the 5 EMA tightens that to 1R.
+
+const ema5 = ta.ema(i, 5, "c")
+if (position && position.side === "long" && bar.c < ema5) {
+  return { target: position.entry + position.risk }
+}
+
+const avgVol = ta.sma(i, 20, "v")
+const body = Math.abs(bar.c - bar.o)
+const span = Math.max(bar.h - bar.l, 0.25)
+if (!position && bar.c > bar.o && body / span >= 0.55 && body >= 4 && bar.v > avgVol * 1.8) {
   const risk = Math.max(bar.c - bar.l, 1)
   return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * 2 }
 }
@@ -57,13 +82,23 @@ export type ScriptRun =
 
 type Field = "o" | "h" | "l" | "c" | "v";
 
+type PositionView = {
+  side: "long" | "short";
+  entry: number;
+  stop: number;
+  target: number;
+  risk: number;
+};
+
 type BarFn = (
   bar: OhlcvBar,
   i: number,
   bars: OhlcvBar[],
   ta: {
     sma: (index: number, length: number, field: Field) => number;
+    ema: (index: number, length: number, field: Field) => number;
   },
+  position: PositionView | null,
 ) => unknown;
 
 function isField(value: unknown): value is Field {
@@ -77,6 +112,13 @@ function isBarFn(value: unknown): value is BarFn {
 function readNumber(record: Record<string, unknown>, key: string): number | null {
   const value = record[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readTarget(value: unknown): number | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = Object.fromEntries(Object.entries(value));
+  if (record.signal === true) return null;
+  return readNumber(record, "target");
 }
 
 function readSignal(value: unknown): {
@@ -100,6 +142,7 @@ function compile(source: string): BarFn {
     "i",
     "bars",
     "ta",
+    "position",
     `"use strict";\n${source}`,
   );
   if (!isBarFn(created)) {
@@ -117,6 +160,7 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
     return { ok: false, error: message, markers: [], trades: [] };
   }
 
+  const emaCache = new Map<string, (number | null)[]>();
   const ta = {
     sma(index: number, length: number, field: Field) {
       if (!isField(field) || length < 1) return 0;
@@ -128,6 +172,20 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
         count += 1;
       }
       return count === 0 ? 0 : sum / count;
+    },
+    ema(index: number, length: number, field: Field) {
+      if (!isField(field) || length < 1) return 0;
+      const period = Math.floor(length);
+      const key = `${field}:${period}`;
+      let series = emaCache.get(key);
+      if (!series) {
+        series = ema(
+          bars.map((bar) => bar[field]),
+          period,
+        );
+        emaCache.set(key, series);
+      }
+      return series[index] ?? 0;
     },
   };
 
@@ -142,17 +200,39 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
         open.side === "long" ? bar.l <= open.stopPrice : bar.h >= open.stopPrice;
       const targeted =
         open.side === "long" ? bar.h >= open.targetPrice : bar.l <= open.targetPrice;
-      if (stopped || targeted) {
-        const reason = stopped ? "stop" : "target";
+      if (!stopped && !targeted) {
+        let managed: unknown;
+        try {
+          managed = fn(bar, i, bars, ta, {
+            side: open.side,
+            entry: open.entryPrice,
+            stop: open.stopPrice,
+            target: open.targetPrice,
+            risk: open.riskPoints,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Script threw.";
+          return { ok: false, error: `Bar ${i + 1}: ${message}`, markers: [], trades: [] };
+        }
+        const nextTarget = readTarget(managed);
+        if (nextTarget !== null) open.targetPrice = nextTarget;
+      }
+      const hitStop =
+        open.side === "long" ? bar.l <= open.stopPrice : bar.h >= open.stopPrice;
+      const hitTarget =
+        open.side === "long" ? bar.h >= open.targetPrice : bar.l <= open.targetPrice;
+      if (hitStop || hitTarget) {
+        const reason = hitStop ? "stop" : "target";
+        const price = reason === "stop" ? open.stopPrice : open.targetPrice;
         open.exitIndex = i;
         open.exitReason = reason;
-        open.exitPrice = reason === "stop" ? open.stopPrice : open.targetPrice;
+        open.exitPrice = price;
         markers.push({
           barIndex: i,
           visibleFromIndex: i,
           kind: "exit",
           win: reason === "target",
-          price: reason === "stop" ? open.stopPrice : open.targetPrice,
+          price,
           side: open.side,
         });
         trades.push(open);
@@ -163,7 +243,7 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
 
     let result: unknown;
     try {
-      result = fn(bar, i, bars, ta);
+      result = fn(bar, i, bars, ta, null);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Script threw.";
       return { ok: false, error: `Bar ${i + 1}: ${message}`, markers: [], trades: [] };

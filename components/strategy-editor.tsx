@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import type { FixtureBar } from "@/lib/fixture-bars";
 import {
   DEFAULT_STRATEGY_SCRIPT,
+  LEGACY_DEFAULT_STRATEGY_SCRIPT,
   STRATEGY_STORAGE_KEY,
   runStrategyScript,
   type ScriptRun,
@@ -135,7 +136,8 @@ export function StrategyEditor({
   useEffect(() => {
     const hashed = scriptFromHash();
     const stored = readStoredScript();
-    const next = hashed ?? stored ?? DEFAULT_STRATEGY_SCRIPT;
+    const saved = stored === LEGACY_DEFAULT_STRATEGY_SCRIPT ? null : stored;
+    const next = hashed ?? saved ?? DEFAULT_STRATEGY_SCRIPT;
     if (hashed) {
       writeStoredScript(hashed);
       window.history.replaceState(null, "", window.location.pathname + window.location.search);

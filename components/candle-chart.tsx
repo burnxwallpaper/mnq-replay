@@ -8,10 +8,12 @@ import {
   type HistogramData,
   type IChartApi,
   type ISeriesApi,
+  type LineData,
   type SeriesMarker,
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
+import { ema } from "@/lib/ema";
 import { formatFixturePrice, type FixtureBar } from "@/lib/fixture-bars";
 import type { ChartMarker } from "@/lib/strategies/types";
 
@@ -74,6 +76,7 @@ export function CandleChart({
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const emaRef = useRef<ISeriesApi<"Line"> | null>(null);
   const [span, setSpan] = useState("—");
   const [scale, setScale] = useState("—");
   const [callouts, setCallouts] = useState<TradeCallout[]>([]);
@@ -198,10 +201,19 @@ export function CandleChart({
     candles.priceScale().applyOptions({
       scaleMargins: { top: 0.08, bottom: 0.28 },
     });
+    const emaLine = chart.addLineSeries({
+      color: "#f5c16c",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: false,
+      title: "EMA 5",
+    });
 
     chartRef.current = chart;
     candleRef.current = candles;
     volumeRef.current = volume;
+    emaRef.current = emaLine;
 
     const readScales = () => {
       const range = chart.timeScale().getVisibleRange();
@@ -232,6 +244,7 @@ export function CandleChart({
       chartRef.current = null;
       candleRef.current = null;
       volumeRef.current = null;
+      emaRef.current = null;
     };
   }, []);
 
@@ -239,7 +252,8 @@ export function CandleChart({
     const chart = chartRef.current;
     const candles = candleRef.current;
     const volume = volumeRef.current;
-    if (!chart || !candles || !volume || bars.length === 0) return;
+    const emaLine = emaRef.current;
+    if (!chart || !candles || !volume || !emaLine || bars.length === 0) return;
 
     candles.setData(
       bars.map((bar) => ({
@@ -256,6 +270,17 @@ export function CandleChart({
       color: bar.c >= bar.o ? "rgba(61,214,140,0.8)" : "rgba(239,107,115,0.8)",
     }));
     volume.setData(histogram);
+    const emaValues = ema(
+      bars.map((bar) => bar.c),
+      5,
+    );
+    const emaData: LineData[] = [];
+    for (let index = 0; index < bars.length; index += 1) {
+      const value = emaValues[index];
+      if (value === null) continue;
+      emaData.push({ time: unix(bars[index].ts), value });
+    }
+    emaLine.setData(emaData);
     chart.timeScale().setVisibleLogicalRange({
       from: Math.max(0, bars.length - 110),
       to: bars.length + 3,
@@ -313,7 +338,7 @@ export function CandleChart({
         ref={frameRef}
         className="absolute inset-0"
         role="img"
-        aria-label="MNQ 1-minute candlestick chart with volume. Drag the chart to pan. Drag the right price scale up or down to zoom."
+        aria-label="MNQ 1-minute candlestick chart with volume and a 5 EMA. Drag the chart to pan. Drag the right price scale up or down to zoom."
       />
       <div id="trade-callouts" className="pointer-events-none absolute inset-0 z-20">
         {callouts.map((callout) => (
