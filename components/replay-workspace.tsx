@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { BacktestReport } from "@/components/backtest-report";
 import { CandleChart } from "@/components/candle-chart";
 import { ReplayTransport } from "@/components/replay-transport";
 import { StrategyEditor } from "@/components/strategy-editor";
@@ -14,7 +15,7 @@ import {
   loadMnqBars,
   type FixtureBar,
 } from "@/lib/fixture-bars";
-import { scoreScript, type ScriptRun } from "@/lib/strategy-script";
+import { scoreScript, summarizeBacktest, type ScriptRun } from "@/lib/strategy-script";
 
 const PLAY_MS = 180;
 const INITIAL_VISIBLE = 180;
@@ -112,6 +113,10 @@ export function ReplayWorkspace() {
     if (!bars || !scriptRun?.ok) return null;
     return scoreScript(scriptRun.trades, bars, periodEnd);
   }, [scriptRun, periodEnd, bars]);
+  const backtestStats = useMemo(() => {
+    if (!bars || !scriptRun?.ok) return null;
+    return summarizeBacktest(scriptRun, bars);
+  }, [scriptRun, bars]);
 
   if (loadError) {
     return (
@@ -199,6 +204,7 @@ export function ReplayWorkspace() {
       </p>
 
       <div className="grid flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
+        <div className="flex min-w-0 flex-col gap-3">
         <section
           aria-label="Candlestick chart"
           className="relative min-h-[340px] flex-1 overflow-hidden rounded-xl bg-[oklch(0.145_0.016_255)] ring-1 ring-foreground/10 lg:min-h-[520px]"
@@ -216,6 +222,8 @@ export function ReplayWorkspace() {
             fitRevision={fitRevision}
           />
         </section>
+        <BacktestReport stats={backtestStats} />
+        </div>
 
         <Card className="h-fit">
           <CardHeader>
@@ -313,8 +321,8 @@ export function ReplayWorkspace() {
       />
 
       <p className="text-xs text-muted-foreground">
-        Apply strategy draws entries and exits for the whole loaded series and
-        totals PnL, R, and trade count for that period. Replay only moves the
+        Apply strategy draws entries and exits for the whole loaded series,
+        the equity curve, and the stats below the chart. Replay only moves the
         cursor. Drag the chart to pan, and drag the price scale to zoom.
         Dates and times are on the bottom axis. Volume is the histogram
         underneath. Script edits stay in this browser.

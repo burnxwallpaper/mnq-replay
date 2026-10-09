@@ -206,6 +206,107 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
   return { ok: true, markers, trades };
 }
 
+export const MNQ_POINT_VALUE = 2;
+
+export type EquityPoint = {
+  ts: number;
+  equity: number;
+};
+
+export type BacktestStats = {
+  winRate: number | null;
+  maxConsecutiveWins: number;
+  maxConsecutiveLosses: number;
+  maxDrawdown: number;
+  averageHoldMs: number | null;
+  signalCount: number;
+  signalPerDay: number | null;
+  equity: EquityPoint[];
+  endingEquity: number;
+};
+
+function isClosed(
+  trade: ScriptTrade,
+): trade is ScriptTrade & {
+  exitIndex: number;
+  exitPrice: number;
+  exitReason: "stop" | "target";
+} {
+  return trade.exitIndex !== null && trade.exitPrice !== null && trade.exitReason !== null;
+}
+
+function tradePnl(trade: ScriptTrade, exitPrice: number) {
+  const sign = trade.side === "short" ? -1 : 1;
+  const risk = trade.riskPoints === 0 ? 0.25 : trade.riskPoints;
+  return (((exitPrice - trade.entryPrice) * sign) / risk) * MNQ_POINT_VALUE;
+}
+
+export function summarizeBacktest(
+  run: { markers: ScriptMarker[]; trades: ScriptTrade[] },
+  bars: OhlcvBar[],
+): BacktestStats {
+  const closed = run.trades
+    .filter(isClosed)
+    .sort((left, right) => left.exitIndex - right.exitIndex || left.entryIndex - right.entryIndex);
+  let winStreak = 0;
+  let lossStreak = 0;
+  let maxConsecutiveWins = 0;
+  let maxConsecutiveLosses = 0;
+  let wins = 0;
+  let holdMs = 0;
+  for (const trade of closed) {
+    holdMs += bars[trade.exitIndex].ts - bars[trade.entryIndex].ts;
+    if (trade.exitReason === "target") {
+      wins += 1;
+      winStreak += 1;
+      lossStreak = 0;
+      if (winStreak > maxConsecutiveWins) maxConsecutiveWins = winStreak;
+    } else {
+      lossStreak += 1;
+      winStreak = 0;
+      if (lossStreak > maxConsecutiveLosses) maxConsecutiveLosses = lossStreak;
+    }
+  }
+
+  const equity: EquityPoint[] = [{ ts: bars[0].ts, equity: 0 }];
+  let cursorEquity = 0;
+  for (const trade of closed) {
+    cursorEquity += tradePnl(trade, trade.exitPrice);
+    equity.push({ ts: bars[trade.exitIndex].ts, equity: cursorEquity });
+  }
+  const open = run.trades.find((trade) => trade.exitIndex === null);
+  const lastBar = bars[bars.length - 1];
+  if (open) {
+    cursorEquity += tradePnl(open, lastBar.c);
+    equity.push({ ts: lastBar.ts, equity: cursorEquity });
+  } else if (equity[equity.length - 1].ts !== lastBar.ts) {
+    equity.push({ ts: lastBar.ts, equity: cursorEquity });
+  }
+
+  let peak = 0;
+  let maxDrawdown = 0;
+  for (const point of equity) {
+    if (point.equity > peak) peak = point.equity;
+    const drop = peak - point.equity;
+    if (drop > maxDrawdown) maxDrawdown = drop;
+  }
+
+  const spanDays = (lastBar.ts - bars[0].ts) / 86_400_000;
+  const signalCount = run.markers.filter((marker) => marker.kind === "signal").length;
+
+  return {
+    winRate: closed.length === 0 ? null : wins / closed.length,
+    maxConsecutiveWins,
+    maxConsecutiveLosses,
+    maxDrawdown,
+    averageHoldMs: closed.length === 0 ? null : holdMs / closed.length,
+    signalCount,
+    signalPerDay: spanDays <= 0 ? null : signalCount / spanDays,
+    equity,
+    endingEquity: cursorEquity,
+  };
+}
+
 export function scoreScript(
   trades: ScriptTrade[],
   bars: OhlcvBar[],
@@ -217,7 +318,7 @@ export function scoreScript(
   let openTrades = 0;
   let wins = 0;
   let losses = 0;
-  const pointValue = 2;
+  const pointValue = MNQ_POINT_VALUE;
 
   for (const trade of trades) {
     if (trade.entryIndex > cursor) continue;
