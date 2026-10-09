@@ -214,7 +214,7 @@ export function ReplayWorkspace() {
             <span className="text-[oklch(0.84_0.14_88)]">Signal</span>
             <span className="text-[oklch(0.78_0.15_155)]">Entry</span>
             <span>Exit</span>
-            <span className="text-[#f5c16c]">EMA 5</span>
+            <span className="text-[#39d0ff]">EMA 5</span>
           </div>
           <CandleChart
             bars={bars}

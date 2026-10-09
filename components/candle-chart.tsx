@@ -79,6 +79,7 @@ export function CandleChart({
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const emaRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const emaHaloRef = useRef<ISeriesApi<"Line"> | null>(null);
   const [span, setSpan] = useState("—");
   const [scale, setScale] = useState("—");
   const [callouts, setCallouts] = useState<TradeCallout[]>([]);
@@ -206,18 +207,27 @@ export function CandleChart({
     candles.priceScale().applyOptions({
       scaleMargins: { top: 0.08, bottom: 0.28 },
     });
+    const emaHalo = chart.addLineSeries({
+      color: "#071018",
+      lineWidth: 4,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
     const emaLine = chart.addLineSeries({
-      color: "#f5c16c",
+      color: "#39d0ff",
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: true,
-      crosshairMarkerVisible: false,
+      crosshairMarkerVisible: true,
+      crosshairMarkerRadius: 4,
       title: "EMA 5",
     });
 
     chartRef.current = chart;
     candleRef.current = candles;
     volumeRef.current = volume;
+    emaHaloRef.current = emaHalo;
     emaRef.current = emaLine;
 
     const readScales = () => {
@@ -279,6 +289,7 @@ export function CandleChart({
       chartRef.current = null;
       candleRef.current = null;
       volumeRef.current = null;
+      emaHaloRef.current = null;
       emaRef.current = null;
     };
   }, []);
@@ -288,7 +299,8 @@ export function CandleChart({
     const candles = candleRef.current;
     const volume = volumeRef.current;
     const emaLine = emaRef.current;
-    if (!chart || !candles || !volume || !emaLine || bars.length === 0) return;
+    const emaHalo = emaHaloRef.current;
+    if (!chart || !candles || !volume || !emaLine || !emaHalo || bars.length === 0) return;
 
     candles.setData(
       bars.map((bar) => ({
@@ -315,6 +327,7 @@ export function CandleChart({
       if (value === null) continue;
       emaData.push({ time: unix(bars[index].ts), value });
     }
+    emaHalo.setData(emaData);
     emaLine.setData(emaData);
     chart.timeScale().setVisibleLogicalRange({
       from: Math.max(0, bars.length - 110),
