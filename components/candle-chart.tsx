@@ -37,6 +37,7 @@ type TradeCallout = {
   labelY: number;
   text: string;
   color: string;
+  textColor: string;
   align: "left" | "right";
 };
 
@@ -114,6 +115,7 @@ export function CandleChart({
       }
       occupied.push({ x, y });
       const color = marker.kind === "entry" || marker.win ? UP : DOWN;
+      const buyEntry = marker.kind === "entry" && marker.side !== "short";
       placed.push({
         key: `${marker.kind}-${marker.localIndex}`,
         x,
@@ -121,6 +123,7 @@ export function CandleChart({
         labelY: y,
         text: `${tradeVerb(marker.kind, marker.side)} ${formatFixturePrice(marker.price)}`,
         color,
+        textColor: buyEntry ? "#ffffff" : color,
         align: x > width - 168 ? "right" : "left",
       });
     }
@@ -359,7 +362,7 @@ export function CandleChart({
               style={{
                 left: callout.align === "right" ? callout.x - 44 : callout.x + 44,
                 top: callout.labelY,
-                color: callout.color,
+                color: callout.textColor,
                 background: "rgba(18,21,28,0.88)",
                 boxShadow: `inset 0 0 0 1px ${callout.color}`,
                 transform:
