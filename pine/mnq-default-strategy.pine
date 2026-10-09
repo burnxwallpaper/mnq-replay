@@ -1,0 +1,128 @@
+//@version=5
+// Port of the on-page default in lib/strategy-script.ts (DEFAULT_STRATEGY_SCRIPT).
+// Apply this to a 1-minute CME_MINI:MNQ1! chart. One MNQ contract, no commission.
+//
+// Rules, matched to the site:
+// - Long only. Enter at the impulse bar's close. No separate pullback order.
+// - Impulse: close > open, body/span >= 0.55, body >= 4, volume > 1.8 x the 20-bar volume average.
+//   Span is at least 0.25. The volume average uses the bars available until 20 exist.
+// - New longs only while the Chicago hour is 09:00–21:59 (hours 9 through 21).
+//   22:00–08:59 Chicago cannot open a trade. An open trade is still managed then.
+// - Stop is the signal bar's low. Initial target is 2R, with R = max(close - low, 1) for that target.
+// - The 1R latch uses max(close - low, 0.25). A later close under the 5 EMA sets the target to entry + that R and leaves it there.
+// - Stop and the current target are tested before that tighten. A bar that reaches 2R exits at 2R.
+//   If it reaches neither, and the close is under the 5 EMA, the target becomes 1R. If that same bar's high reached 1R, it exits at 1R.
+// - If the bar touches the stop and the target, the stop fills.
+// - The 5 EMA is the standard SMA-seeded EMA (seed at bar 5, then 2/(5+1)).
+//
+// The stop and target are armed on the bars after the signal bar, so the signal
+// bar's own low does not stop the trade out. Entry still fills at that bar's close.
+// TradingView fills a stop or limit at the open when a later bar gaps through it.
+// The site fills those at the stop or target price.
+strategy("MNQ Impulse 5EMA Session",
+     shorttitle="MNQ 5EMA",
+     overlay=true,
+     pyramiding=0,
+     process_orders_on_close=true,
+     calc_on_every_tick=false,
+     calc_on_order_fills=false,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     initial_capital=100000,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0,
+     slippage=0,
+     margin_long=0,
+     margin_short=0,
+     backtest_fill_limits_assumption=0,
+     max_labels_count=500,
+     max_lines_count=500)
+
+emaLength = input.int(5, "EMA length", minval=1)
+volLength = input.int(20, "Volume average length", minval=1)
+volMultiple = input.float(1.8, "Volume multiple", minval=0.1, step=0.1)
+bodySpanMin = input.float(0.55, "Min body/span", minval=0.0, maxval=1.0, step=0.05)
+minBody = input.float(4.0, "Min body (points)", minval=0.0, step=0.25)
+sessionFirstHour = input.int(9, "First Chicago hour that may enter", minval=0, maxval=23)
+sessionLastHour = input.int(21, "Last Chicago hour that may enter", minval=0, maxval=23)
+
+spanFloor = 0.25
+targetRiskFloor = 1.0
+latchRiskFloor = 0.25
+
+int ctHour = hour(time, "America/Chicago")
+bool sessionOk = ctHour >= sessionFirstHour and ctHour <= sessionLastHour
+
+float ema5 = ta.ema(close, emaLength)
+float volSum = ta.cum(volume)
+float avgVol = bar_index + 1 < volLength ? volSum / (bar_index + 1) : ta.sma(volume, volLength)
+
+float body = math.abs(close - open)
+float span = math.max(high - low, spanFloor)
+bool impulse = close > open and body / span >= bodySpanMin and body >= minBody and volume > avgVol * volMultiple
+
+var bool inPos = false
+var float entryPx = na
+var float stopPx = na
+var float targetPx = na
+var float riskPts = na
+var int tradeNum = 0
+var string openId = na
+
+bool confirmed = barstate.isconfirmed
+float fillStop = na
+float fillLimit = na
+bool entered = false
+
+if inPos
+    bool stopped = low <= stopPx
+    bool targeted = high >= targetPx
+    if not stopped and not targeted and close < ema5
+        targetPx := entryPx + riskPts
+        targeted := high >= targetPx
+    if stopped or targeted
+        if stopped
+            fillStop := stopPx
+        else
+            fillLimit := targetPx
+        inPos := false
+
+bool flatNow = not inPos and na(fillStop) and na(fillLimit)
+if flatNow and sessionOk and impulse
+    float targetDist = math.max(close - low, targetRiskFloor)
+    tradeNum += 1
+    openId := "L" + str.tostring(tradeNum)
+    entryPx := close
+    stopPx := low
+    targetPx := close + targetDist * 2.0
+    riskPts := math.max(math.abs(close - low), latchRiskFloor)
+    inPos := true
+    entered := true
+
+if confirmed and entered
+    strategy.entry(openId, strategy.long, comment="Buy")
+
+// One exit command per bar, after the signal bar. Stop only when both prices are touched.
+bool manage = confirmed and not entered and (inPos or not na(fillStop) or not na(fillLimit))
+if manage and not na(fillStop)
+    strategy.exit("Exit", from_entry=openId, stop=fillStop, comment="Stop")
+else if manage and not na(fillLimit)
+    strategy.exit("Exit", from_entry=openId, stop=stopPx, limit=fillLimit, comment="Target")
+else if manage
+    strategy.exit("Exit", from_entry=openId, stop=stopPx, limit=targetPx)
+
+plot(ema5, "EMA 5 halo", color=#071018, linewidth=4)
+plot(ema5, "EMA 5", color=#39d0ff, linewidth=2)
+bgcolor(sessionOk ? na : color.new(#ef6b73, 92), title="22:00–08:59 Chicago, no new longs")
+
+if entered
+    label.new(bar_index, entryPx, "Buy " + str.tostring(entryPx, format.mintick), style=label.style_label_up, color=#3dd68c, textcolor=#ffffff, size=size.small)
+    line.new(bar_index, entryPx, bar_index + 2, entryPx, color=#3dd68c, width=1)
+
+if not na(fillStop)
+    label.new(bar_index, fillStop, "Sell " + str.tostring(fillStop, format.mintick), style=label.style_label_down, color=#ef6b73, textcolor=#ef6b73, size=size.small)
+    line.new(bar_index, fillStop, bar_index + 2, fillStop, color=#ef6b73, width=1)
+
+if not na(fillLimit)
+    label.new(bar_index, fillLimit, "Sell " + str.tostring(fillLimit, format.mintick), style=label.style_label_down, color=#3dd68c, textcolor=#3dd68c, size=size.small)
+    line.new(bar_index, fillLimit, bar_index + 2, fillLimit, color=#3dd68c, width=1)
