@@ -219,8 +219,11 @@ export type BacktestStats = {
   maxConsecutiveLosses: number;
   maxDrawdown: number;
   averageHoldMs: number | null;
+  longestHoldMs: number | null;
+  shortestHoldMs: number | null;
+  medianHoldMs: number | null;
   signalCount: number;
-  signalPerDay: number | null;
+  signalIntervalMs: number | null;
   equity: EquityPoint[];
   endingEquity: number;
 };
@@ -253,9 +256,9 @@ export function summarizeBacktest(
   let maxConsecutiveWins = 0;
   let maxConsecutiveLosses = 0;
   let wins = 0;
-  let holdMs = 0;
+  const holds: number[] = [];
   for (const trade of closed) {
-    holdMs += bars[trade.exitIndex].ts - bars[trade.entryIndex].ts;
+    holds.push(bars[trade.exitIndex].ts - bars[trade.entryIndex].ts);
     if (trade.exitReason === "target") {
       wins += 1;
       winStreak += 1;
@@ -291,17 +294,29 @@ export function summarizeBacktest(
     if (drop > maxDrawdown) maxDrawdown = drop;
   }
 
-  const spanDays = (lastBar.ts - bars[0].ts) / 86_400_000;
+  const spanMs = lastBar.ts - bars[0].ts;
   const signalCount = run.markers.filter((marker) => marker.kind === "signal").length;
+  const sortedHolds = [...holds].sort((left, right) => left - right);
+  const mid = Math.floor(sortedHolds.length / 2);
+  const medianHoldMs =
+    sortedHolds.length === 0
+      ? null
+      : sortedHolds.length % 2 === 1
+        ? sortedHolds[mid]
+        : (sortedHolds[mid - 1] + sortedHolds[mid]) / 2;
+  const holdTotal = holds.reduce((sum, value) => sum + value, 0);
 
   return {
     winRate: closed.length === 0 ? null : wins / closed.length,
     maxConsecutiveWins,
     maxConsecutiveLosses,
     maxDrawdown,
-    averageHoldMs: closed.length === 0 ? null : holdMs / closed.length,
+    averageHoldMs: holds.length === 0 ? null : holdTotal / holds.length,
+    longestHoldMs: sortedHolds.length === 0 ? null : sortedHolds[sortedHolds.length - 1],
+    shortestHoldMs: sortedHolds.length === 0 ? null : sortedHolds[0],
+    medianHoldMs,
     signalCount,
-    signalPerDay: spanDays <= 0 ? null : signalCount / spanDays,
+    signalIntervalMs: signalCount === 0 || spanMs <= 0 ? null : spanMs / signalCount,
     equity,
     endingEquity: cursorEquity,
   };

@@ -21,10 +21,10 @@ function formatHold(ms: number) {
   return remHours === 0 ? `${days}d` : `${days}d ${remHours}h`;
 }
 
-function formatFrequency(perDay: number) {
-  if (perDay >= 10) return `${Math.round(perDay)} / day`;
-  if (perDay >= 1) return `${perDay.toFixed(1)} / day`;
-  return `${perDay.toFixed(2)} / day`;
+function formatMinutes(ms: number) {
+  const minutes = ms / 60_000;
+  if (minutes >= 10) return `${Math.round(minutes)} min`;
+  return `${minutes.toFixed(1)} min`;
 }
 
 function shortDate(ts: number) {
@@ -189,12 +189,27 @@ export function BacktestReport({ stats }: { stats: BacktestStats | null }) {
           value={stats.averageHoldMs === null ? "—" : formatHold(stats.averageHoldMs)}
         />
         <Stat
+          id="stat-longest-hold"
+          label="Longest holding time"
+          value={stats.longestHoldMs === null ? "—" : formatHold(stats.longestHoldMs)}
+        />
+        <Stat
+          id="stat-shortest-hold"
+          label="Shortest holding time"
+          value={stats.shortestHoldMs === null ? "—" : formatHold(stats.shortestHoldMs)}
+        />
+        <Stat
+          id="stat-median-hold"
+          label="Median holding time"
+          value={stats.medianHoldMs === null ? "—" : formatHold(stats.medianHoldMs)}
+        />
+        <Stat
           id="stat-signal-frequency"
           label="Signal frequency"
           value={
-            stats.signalPerDay === null
+            stats.signalIntervalMs === null
               ? "—"
-              : `${formatFrequency(stats.signalPerDay)} · ${stats.signalCount}`
+              : `every ${formatMinutes(stats.signalIntervalMs)} · ${stats.signalCount}`
           }
         />
       </dl>
