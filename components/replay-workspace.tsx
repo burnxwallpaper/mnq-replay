@@ -15,7 +15,6 @@ import {
 import { bookAtCursor, markersAtCursor, runStrategies } from "@/lib/strategies/engine";
 import type { StrategyConfig } from "@/lib/strategies/types";
 
-const WINDOW = 80;
 const START_INDEX = 39;
 const PLAY_MS = 180;
 
@@ -92,11 +91,10 @@ export function ReplayWorkspace({ strategies }: { strategies: StrategyConfig[] }
     [runs, index],
   );
   const cursor = FIXTURE_BARS[index];
-  const origin = Math.max(0, index - WINDOW + 1);
-  const visible = FIXTURE_BARS.slice(origin, index + 1);
-  const visibleMarkers = markersAtCursor(runs, index)
-    .filter((marker) => marker.barIndex >= origin && marker.barIndex <= index)
-    .map((marker) => ({ ...marker, localIndex: marker.barIndex - origin }));
+  const visibleMarkers = markersAtCursor(runs, index).map((marker) => ({
+    ...marker,
+    localIndex: marker.barIndex,
+  }));
   const cursorLabel = formatFixtureTime(cursor.ts);
   const fields = [
     ["O", formatFixturePrice(cursor.o)],
@@ -121,8 +119,8 @@ export function ReplayWorkspace({ strategies }: { strategies: StrategyConfig[] }
             </Badge>
           </div>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            {FIXTURE_NOTE} Play, pause, or scrub the cursor. Bars after the
-            cursor stay hidden.
+            {FIXTURE_NOTE} Drag the chart to pan. Drag the right price scale up
+            or down to zoom. Scroll to zoom time. Replay only moves the cursor.
           </p>
         </div>
         <p className="font-mono text-sm text-foreground">{cursorLabel}</p>
@@ -139,11 +137,16 @@ export function ReplayWorkspace({ strategies }: { strategies: StrategyConfig[] }
           className="relative min-h-[340px] flex-1 overflow-hidden rounded-xl bg-[oklch(0.145_0.016_255)] ring-1 ring-foreground/10 lg:min-h-[520px]"
         >
           <div className="pointer-events-none absolute top-3 left-3 z-10 flex gap-3 text-[10px] tracking-wide text-muted-foreground uppercase">
+            <span>Drag to pan</span>
             <span className="text-[oklch(0.84_0.14_88)]">Signal</span>
             <span className="text-[oklch(0.78_0.15_155)]">Entry</span>
             <span>Exit</span>
           </div>
-          <CandleChart bars={visible} markers={visibleMarkers} />
+          <CandleChart
+            bars={FIXTURE_BARS}
+            markers={visibleMarkers}
+            cursorIndex={index}
+          />
         </section>
 
         <Card className="h-fit">
@@ -235,9 +238,11 @@ export function ReplayWorkspace({ strategies }: { strategies: StrategyConfig[] }
       />
 
       <p className="text-xs text-muted-foreground">
-        Space plays and pauses. Markers show up only after the cursor reaches
-        them. Thresholds are in strategies/*.json. Totals include the open
-        trade marked at this bar&apos;s close.
+        Space plays and pauses. Drag the chart to look around, and drag the
+        price scale to zoom price. Dates and times are on the bottom axis.
+        Volume is the histogram underneath. Markers show up only after the
+        cursor reaches them. Thresholds are in strategies/*.json. Totals
+        include the open trade marked at this bar&apos;s close.
       </p>
     </main>
   );
