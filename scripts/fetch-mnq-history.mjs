@@ -2,17 +2,21 @@
  * Download CME_MINI:MNQ1! 1-minute bars from TradingView Premium (prodata).
  *
  * Requires process.env.TRADINGVIEW_SESSION (sessionid cookie only).
- * Writes public/mnq-1m.json. Does not print the cookie or auth token.
+ * Writes public/data/mnq-1m-bars.json and docs/data/mnq-1m-bars.json
+ * as a raw [{t,o,h,l,c,v}] array (t = unix seconds). Does not print the cookie or auth token.
  *
  *   TRADINGVIEW_SESSION=... node scripts/fetch-mnq-history.mjs
  */
-import { writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import WebSocket from "ws";
 
 const SYMBOL = "CME_MINI:MNQ1!";
 const DAYS = 32;
-const OUT = resolve("public/mnq-1m.json");
+const OUTS = [
+  resolve("public/data/mnq-1m-bars.json"),
+  resolve("docs/data/mnq-1m-bars.json"),
+];
 
 const session = process.env.TRADINGVIEW_SESSION ?? "";
 if (!session) {
@@ -225,15 +229,17 @@ if (bars.length < 1000) {
 
 const first = new Date(bars[0].ts).toISOString();
 const last = new Date(bars[bars.length - 1].ts).toISOString();
-writeFileSync(
-  OUT,
-  JSON.stringify({
-    symbol: SYMBOL,
-    interval: "1",
-    source: "TradingView Premium",
-    session: "regular",
-    fetchedAt: new Date().toISOString(),
-    bars,
-  }),
-);
-console.log(`Wrote ${bars.length} bars ${first} → ${last} to ${OUT}`);
+const raw = bars.map((bar) => ({
+  t: bar.ts / 1000,
+  o: bar.o,
+  h: bar.h,
+  l: bar.l,
+  c: bar.c,
+  v: bar.v,
+}));
+const payload = JSON.stringify(raw);
+for (const out of OUTS) {
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, payload);
+}
+console.log(`Wrote ${bars.length} bars ${first} → ${last} to ${OUTS.join(", ")}`);
