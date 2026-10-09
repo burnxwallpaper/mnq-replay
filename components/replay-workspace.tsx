@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CandleChart } from "@/components/candle-chart";
 import { ReplayTransport } from "@/components/replay-transport";
+import { StrategyEditor } from "@/components/strategy-editor";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -12,8 +13,7 @@ import {
   formatFixturePrice,
   formatFixtureTime,
 } from "@/lib/fixture-bars";
-import { bookAtCursor, markersAtCursor, runStrategies } from "@/lib/strategies/engine";
-import type { StrategyConfig } from "@/lib/strategies/types";
+import { scoreScript, type ScriptRun } from "@/lib/strategy-script";
 
 const START_INDEX = 39;
 const PLAY_MS = 180;
@@ -28,9 +28,10 @@ function formatPnl(value: number) {
   return `${sign}$${Math.abs(value).toFixed(2)}`;
 }
 
-export function ReplayWorkspace({ strategies }: { strategies: StrategyConfig[] }) {
+export function ReplayWorkspace() {
   const [index, setIndex] = useState(START_INDEX);
   const [playing, setPlaying] = useState(false);
+  const [scriptRun, setScriptRun] = useState<ScriptRun | null>(null);
   const lastIndex = FIXTURE_BARS.length - 1;
   const toggleRef = useRef<() => void>(() => {});
 
@@ -57,7 +58,8 @@ export function ReplayWorkspace({ strategies }: { strategies: StrategyConfig[] }
       const target = event.target;
       if (
         target instanceof HTMLInputElement ||
-        target instanceof HTMLButtonElement
+        target instanceof HTMLButtonElement ||
+        target instanceof HTMLTextAreaElement
       ) {
         return;
       }
@@ -82,19 +84,18 @@ export function ReplayWorkspace({ strategies }: { strategies: StrategyConfig[] }
     setIndex((current) => Math.min(lastIndex, Math.max(0, current + delta)));
   }
 
-  const runs = useMemo(
-    () => runStrategies(FIXTURE_BARS, strategies),
-    [strategies],
-  );
-  const book = useMemo(
-    () => bookAtCursor(runs, FIXTURE_BARS, index),
-    [runs, index],
-  );
   const cursor = FIXTURE_BARS[index];
-  const visibleMarkers = markersAtCursor(runs, index).map((marker) => ({
-    ...marker,
-    localIndex: marker.barIndex,
-  }));
+  const score = useMemo(() => {
+    if (!scriptRun?.ok) return null;
+    return scoreScript(scriptRun.trades, FIXTURE_BARS, index);
+  }, [scriptRun, index]);
+  const visibleMarkers = (scriptRun?.ok ? scriptRun.markers : [])
+    .filter((marker) => marker.visibleFromIndex <= index)
+    .map((marker) => ({
+      ...marker,
+      strategyId: "script",
+      localIndex: marker.barIndex,
+    }));
   const cursorLabel = formatFixtureTime(cursor.ts);
   const fields = [
     ["O", formatFixturePrice(cursor.o)],
@@ -180,47 +181,42 @@ export function ReplayWorkspace({ strategies }: { strategies: StrategyConfig[] }
             <Separator />
             <div className="flex flex-col gap-2">
               <p className="text-xs tracking-wide text-muted-foreground uppercase">
-                Strategies
+                Script at cursor
               </p>
-              {book.strategies.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No enabled configs.</p>
-              ) : (
-                book.strategies.map((strategy) => (
-                  <div key={strategy.id} className="flex flex-col gap-1 text-sm">
-                    <p className="font-medium">{strategy.name}</p>
-                    <dl className="flex flex-col gap-1 font-mono text-xs">
-                      <div className="flex justify-between gap-3">
-                        <dt className="text-muted-foreground">Total R</dt>
-                        <dd>{formatR(strategy.totalR)}</dd>
-                      </div>
-                      <div className="flex justify-between gap-3">
-                        <dt className="text-muted-foreground">Total PnL</dt>
-                        <dd>{formatPnl(strategy.totalPnl)}</dd>
-                      </div>
-                      <div className="flex justify-between gap-3">
-                        <dt className="text-muted-foreground">Realized</dt>
-                        <dd>
-                          {formatR(strategy.realizedR)} · {strategy.closedTrades}
-                        </dd>
-                      </div>
-                      <div className="flex justify-between gap-3">
-                        <dt className="text-muted-foreground">Open</dt>
-                        <dd>
-                          {formatR(strategy.openR)} · {strategy.openTrades}
-                        </dd>
-                      </div>
-                    </dl>
-                    <p className="text-xs text-muted-foreground">
-                      {strategy.wins} wins · {strategy.losses} losses
-                    </p>
+              {score ? (
+                <dl className="flex flex-col gap-1 font-mono text-xs">
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">Total R</dt>
+                    <dd>{formatR(score.totalR)}</dd>
                   </div>
-                ))
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">Total PnL</dt>
+                    <dd>{formatPnl(score.totalPnl)}</dd>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">Realized</dt>
+                    <dd>
+                      {formatR(score.realizedR)} · {score.closedTrades}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">Open</dt>
+                    <dd>
+                      {formatR(score.openR)} · {score.openTrades}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">Wins</dt>
+                    <dd>
+                      {score.wins} · {score.losses} losses
+                    </dd>
+                  </div>
+                </dl>
+              ) : scriptRun && !scriptRun.ok ? (
+                <p className="text-sm text-muted-foreground">Script has an error.</p>
+              ) : (
+                <p className="text-sm text-muted-foreground">Running script.</p>
               )}
-              {book.strategies.length > 1 ? (
-                <p className="font-mono text-xs">
-                  All strategies {formatR(book.totalR)} · {formatPnl(book.totalPnl)}
-                </p>
-              ) : null}
             </div>
           </CardContent>
         </Card>
@@ -237,12 +233,13 @@ export function ReplayWorkspace({ strategies }: { strategies: StrategyConfig[] }
         onJump={scrub}
       />
 
+      <StrategyEditor onRun={setScriptRun} />
+
       <p className="text-xs text-muted-foreground">
-        Space plays and pauses. Drag the chart to look around, and drag the
-        price scale to zoom price. Dates and times are on the bottom axis.
-        Volume is the histogram underneath. Markers show up only after the
-        cursor reaches them. Thresholds are in strategies/*.json. Totals
-        include the open trade marked at this bar&apos;s close.
+        Space plays and pauses outside the editor. Drag the chart to pan, and
+        drag the price scale to zoom. Dates and times are on the bottom axis.
+        Volume is the histogram underneath. Script markers show after the
+        cursor reaches them. Script edits stay in this browser.
       </p>
     </main>
   );

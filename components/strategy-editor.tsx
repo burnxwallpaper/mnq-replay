@@ -1,0 +1,187 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { FIXTURE_BARS } from "@/lib/fixture-bars";
+import {
+  DEFAULT_STRATEGY_SCRIPT,
+  STRATEGY_STORAGE_KEY,
+  runStrategyScript,
+  type ScriptRun,
+} from "@/lib/strategy-script";
+
+type StrategyApi = {
+  getScript: () => string;
+  setScript: (script: string) => void;
+  resetScript: () => void;
+  storageKey: string;
+};
+
+declare global {
+  interface Window {
+    mnqStrategy?: StrategyApi;
+  }
+}
+
+function readStoredScript(): string | null {
+  try {
+    return window.localStorage.getItem(STRATEGY_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredScript(script: string) {
+  try {
+    window.localStorage.setItem(STRATEGY_STORAGE_KEY, script);
+  } catch {
+    // Private mode can reject storage. The editor still runs in memory.
+  }
+}
+
+function scriptFromHash(): string | null {
+  const hash = window.location.hash;
+  const prefix = "#script=";
+  if (!hash.startsWith(prefix)) return null;
+  try {
+    return decodeURIComponent(hash.slice(prefix.length));
+  } catch {
+    return null;
+  }
+}
+
+export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
+  const [script, setScript] = useState(DEFAULT_STRATEGY_SCRIPT);
+  const [status, setStatus] = useState("Loading saved script…");
+  const gutterRef = useRef<HTMLPreElement>(null);
+  const onRunRef = useRef(onRun);
+  const scriptRef = useRef(script);
+  const loadedRef = useRef(false);
+  onRunRef.current = onRun;
+  scriptRef.current = script;
+
+  useEffect(() => {
+    const apply = (next: string) => {
+      scriptRef.current = next;
+      setScript(next);
+    };
+
+    const api: StrategyApi = {
+      getScript: () => scriptRef.current,
+      setScript: (next) => apply(next),
+      resetScript: () => apply(DEFAULT_STRATEGY_SCRIPT),
+      storageKey: STRATEGY_STORAGE_KEY,
+    };
+    window.mnqStrategy = api;
+
+    function onMessage(event: MessageEvent) {
+      if (event.origin !== window.location.origin) return;
+      const data: unknown = event.data;
+      if (typeof data !== "object" || data === null) return;
+      if (!("type" in data) || data.type !== "mnq-set-script") return;
+      if (!("script" in data) || typeof data.script !== "string") return;
+      apply(data.script);
+    }
+
+    function onCustom(event: Event) {
+      if (!(event instanceof CustomEvent)) return;
+      if (typeof event.detail !== "string") return;
+      apply(event.detail);
+    }
+
+    window.addEventListener("message", onMessage);
+    window.addEventListener("mnq-set-script", onCustom);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      window.removeEventListener("mnq-set-script", onCustom);
+      delete window.mnqStrategy;
+    };
+  }, []);
+
+  useEffect(() => {
+    let next = script;
+    if (!loadedRef.current) {
+      loadedRef.current = true;
+      const hashed = scriptFromHash();
+      const stored = readStoredScript();
+      next = hashed ?? stored ?? DEFAULT_STRATEGY_SCRIPT;
+      if (hashed) {
+        writeStoredScript(hashed);
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      }
+      if (next !== script) {
+        setScript(next);
+        return;
+      }
+    }
+
+    writeStoredScript(next);
+    const run = runStrategyScript(FIXTURE_BARS, next);
+    if (run.ok) {
+      const closed = run.trades.filter((trade) => trade.exitIndex !== null).length;
+      const trades = run.trades.length === 1 ? "1 trade" : `${run.trades.length} trades`;
+      setStatus(`Applied in this browser. ${trades}, ${closed} closed. No redeploy.`);
+    } else {
+      setStatus(run.error);
+    }
+    onRunRef.current(run);
+  }, [script]);
+
+  const lineCount = Math.max(1, script.split("\n").length);
+  const gutter = Array.from({ length: lineCount }, (_, line) => String(line + 1)).join("\n");
+
+  return (
+    <section
+      aria-label="Strategy script editor"
+      className="rounded-xl bg-card p-3 ring-1 ring-foreground/10"
+    >
+      <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 className="font-mono text-sm font-medium">Strategy script</h2>
+          <p className="max-w-3xl text-xs text-muted-foreground">
+            Pine-style bar script. Edits stay in localStorage under {STRATEGY_STORAGE_KEY}.
+            A bot can change the open page with mnqStrategy.setScript(code) and it reruns
+            without a redeploy.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => setScript(DEFAULT_STRATEGY_SCRIPT)}
+        >
+          Reset
+        </Button>
+      </div>
+      <div className="grid grid-cols-[2.5rem_minmax(0,1fr)] overflow-hidden rounded-md bg-black/50 ring-1 ring-foreground/10">
+        <pre
+          ref={gutterRef}
+          aria-hidden="true"
+          className="overflow-hidden px-1 py-2 text-right font-mono text-xs leading-5 text-muted-foreground"
+        >
+          {gutter}
+        </pre>
+        <textarea
+          id="strategy-script"
+          aria-label="Strategy script"
+          spellCheck={false}
+          value={script}
+          onChange={(event) => setScript(event.target.value)}
+          onScroll={(event) => {
+            if (gutterRef.current) {
+              gutterRef.current.scrollTop = event.currentTarget.scrollTop;
+            }
+          }}
+          className="max-h-72 min-h-48 w-full resize-y bg-transparent px-2 py-2 font-mono text-xs leading-5 text-foreground outline-none"
+        />
+      </div>
+      <p
+        id="strategy-script-status"
+        role="status"
+        className="mt-2 font-mono text-xs text-muted-foreground"
+      >
+        {status}
+      </p>
+    </section>
+  );
+}
