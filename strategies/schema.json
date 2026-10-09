@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.mnq-replay/strategies/schema.json",
+  "title": "MNQ replay strategy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "enabled", "type", "timeframe", "params"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable id. One JSON file per strategy. The filename is not the id."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "type": {
+      "const": "impulse_pullback_long",
+      "description": "Runner to use. Numbers that change behavior belong in params, not in code."
+    },
+    "timeframe": {
+      "const": "1m"
+    },
+    "params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lookback",
+        "minBodyRatio",
+        "minBodyMultiple",
+        "minVolumeMultiple",
+        "maxPullbackVolumeMultiple",
+        "minClosePositionInSignalRange",
+        "maxPullbackBars",
+        "rewardMultiple",
+        "limitExpiryBars",
+        "pointValue",
+        "quantity"
+      ],
+      "properties": {
+        "lookback": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Bars before the signal used for average body and average volume."
+        },
+        "minBodyRatio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "Signal body divided by signal range (high-low). Near 1 is a full body. 0.7 means wicks are at most 30% of the bar."
+        },
+        "minBodyMultiple": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Signal body must be at least this many times the average absolute body over lookback."
+        },
+        "minVolumeMultiple": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Signal volume must be at least this many times average lookback volume. A typical 1-minute impulse is about 2 to 3 times recent volume."
+        },
+        "maxPullbackVolumeMultiple": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Pullback volume must be at or below this multiple of the same lookback average. Below 1 is quieter than recent bars."
+        },
+        "minClosePositionInSignalRange": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Where the pullback close sits in the signal bar, from low (0) to high (1). 0.5 requires the close in the upper half: (close - signalLow) / (signalHigh - signalLow)."
+        },
+        "maxPullbackBars": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many bars after the signal may contain the red pullback. 1 means the next bar only."
+        },
+        "rewardMultiple": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Take-profit distance in R. R is signal close minus signal low. 2 places the target at entry + 2R."
+        },
+        "limitExpiryBars": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Bars after the pullback close to keep the buy limit working. The limit is at the signal close and is only eligible once the pullback has closed."
+        },
+        "pointValue": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Dollars per point for one contract. Micro E-mini Nasdaq-100 is 2."
+        },
+        "quantity": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Contracts per trade."
+        }
+      }
+    }
+  }
+}
