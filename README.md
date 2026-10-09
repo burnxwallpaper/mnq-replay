@@ -2,7 +2,7 @@
 
 Personal 1-minute Micro E-mini Nasdaq-100 replay. The page is a candlestick chart with play, pause, step, and a scrubber.
 
-The candles are a synthetic fixture from `lib/fixture-bars.ts`. They are not real MNQ history, not a broker feed, and not a TradingView export. One scripted impulse is planted in that fixture so the first strategy has a trade to show.
+The chart loads real `CME_MINI:MNQ1!` 1-minute OHLCV from `public/data/mnq-1m-bars.json` (TradingView Premium prodata dump). Refresh that file to update history.
 
 ## Preview
 
@@ -59,7 +59,8 @@ TradingView, logged out, exposes roughly the current week of 1-minute bars. A Pr
 | --- | --- |
 | `app/` | Replay page, statically exported to `out/` |
 | `.github/workflows/pages.yml` | GitHub Actions deploy of `out/` |
-| `lib/fixture-bars.ts` | Synthetic 1-minute series used by the chart |
+| `lib/fixture-bars.ts` | Bar loaders/formatters; data file is `public/data/mnq-1m-bars.json` |
+| `public/data/mnq-1m-bars.json` | Real MNQ1! 1m OHLCV (`t,o,h,l,c,v`) |
 | `strategies/` | One JSON config per strategy, plus `schema.json` |
 | `db/schema.sql` | Tracked bar-table schema |
 | `data/raw/` | Future dumps, gitignored |

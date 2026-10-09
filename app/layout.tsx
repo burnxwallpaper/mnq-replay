@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "MNQ Replay",
   description:
-    "Personal 1-minute Micro E-mini Nasdaq-100 replay. No market data is included.",
+    "Personal 1-minute Micro E-mini Nasdaq-100 replay with real MNQ1! history.",
 };
 
 export default function RootLayout({

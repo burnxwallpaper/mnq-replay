@@ -8,15 +8,16 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import {
-  FIXTURE_BARS,
   FIXTURE_NOTE,
   formatFixturePrice,
   formatFixtureTime,
+  loadMnqBars,
+  type FixtureBar,
 } from "@/lib/fixture-bars";
 import { scoreScript, type ScriptRun } from "@/lib/strategy-script";
 
-const START_INDEX = 39;
 const PLAY_MS = 180;
+const INITIAL_VISIBLE = 180;
 
 function formatR(value: number) {
   const sign = value > 0 ? "+" : "";
@@ -29,25 +30,46 @@ function formatPnl(value: number) {
 }
 
 export function ReplayWorkspace() {
-  const [index, setIndex] = useState(START_INDEX);
+  const [bars, setBars] = useState<FixtureBar[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [scriptRun, setScriptRun] = useState<ScriptRun | null>(null);
   const [fitRevision, setFitRevision] = useState(0);
-  const lastIndex = FIXTURE_BARS.length - 1;
+  const lastIndex = bars ? bars.length - 1 : 0;
   const toggleRef = useRef<() => void>(() => {});
 
+  useEffect(() => {
+    let cancelled = false;
+    loadMnqBars()
+      .then((loaded) => {
+        if (cancelled) return;
+        setBars(loaded);
+        setIndex(Math.max(0, loaded.length - INITIAL_VISIBLE));
+        setFitRevision((current) => current + 1);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setLoadError(error instanceof Error ? error.message : "Failed to load bars");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   toggleRef.current = () => {
+    if (!bars) return;
     if (!playing && index >= lastIndex) setIndex(0);
     setPlaying((current) => !current);
   };
 
   useEffect(() => {
-    if (!playing) return;
+    if (!playing || !bars) return;
     const timer = window.setInterval(() => {
       setIndex((current) => Math.min(lastIndex, current + 1));
     }, PLAY_MS);
     return () => window.clearInterval(timer);
-  }, [playing, lastIndex]);
+  }, [playing, lastIndex, bars]);
 
   useEffect(() => {
     if (playing && index >= lastIndex) setPlaying(false);
@@ -85,12 +107,33 @@ export function ReplayWorkspace() {
     setIndex((current) => Math.min(lastIndex, Math.max(0, current + delta)));
   }
 
-  const cursor = FIXTURE_BARS[index];
-  const periodEnd = FIXTURE_BARS.length - 1;
+  const periodEnd = bars ? bars.length - 1 : 0;
   const score = useMemo(() => {
-    if (!scriptRun?.ok) return null;
-    return scoreScript(scriptRun.trades, FIXTURE_BARS, periodEnd);
-  }, [scriptRun, periodEnd]);
+    if (!bars || !scriptRun?.ok) return null;
+    return scoreScript(scriptRun.trades, bars, periodEnd);
+  }, [scriptRun, periodEnd, bars]);
+
+  if (loadError) {
+    return (
+      <main className="mx-auto flex min-h-dvh w-full max-w-[720px] flex-col gap-3 p-6">
+        <h1 className="font-mono text-lg font-medium">MNQ Replay</h1>
+        <p className="text-sm text-muted-foreground">{loadError}</p>
+      </main>
+    );
+  }
+
+  if (!bars) {
+    return (
+      <main className="mx-auto flex min-h-dvh w-full max-w-[720px] flex-col gap-3 p-6">
+        <h1 className="font-mono text-lg font-medium">MNQ Replay</h1>
+        <p className="font-mono text-sm text-muted-foreground">
+          Loading MNQ 1m history…
+        </p>
+      </main>
+    );
+  }
+
+  const cursor = bars[index];
   const chartMarkers = (scriptRun?.ok ? scriptRun.markers : []).map((marker) => ({
     ...marker,
     strategyId: "script",
@@ -103,6 +146,8 @@ export function ReplayWorkspace() {
   const entryLabel = entryCount === 1 ? "1 entry" : `${entryCount} entries`;
   const exitLabel = exitCount === 1 ? "1 exit" : `${exitCount} exits`;
   const cursorLabel = formatFixtureTime(cursor.ts);
+  const earliestLabel = formatFixtureTime(bars[0].ts);
+  const latestLabel = formatFixtureTime(bars[bars.length - 1].ts);
   const fields = [
     ["O", formatFixturePrice(cursor.o)],
     ["H", formatFixturePrice(cursor.h)],
@@ -120,14 +165,16 @@ export function ReplayWorkspace() {
               MNQ Replay
             </h1>
             <Badge variant="outline">1m</Badge>
-            <Badge variant="secondary">Synthetic fixture</Badge>
+            <Badge variant="secondary">MNQ1! live dump</Badge>
             <Badge variant={playing ? "default" : "outline"}>
               {playing ? "Playing" : "Paused"}
             </Badge>
           </div>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            {FIXTURE_NOTE} Drag the chart to pan. Drag the right price scale up
-            or down to zoom. Scroll to zoom time. Replay only moves the cursor.
+            {FIXTURE_NOTE} {bars.length.toLocaleString("en-US")} bars ·{" "}
+            {earliestLabel} → {latestLabel}. Drag the chart to pan. Drag the
+            right price scale up or down to zoom. Scroll to zoom time. Replay
+            only moves the cursor.
           </p>
         </div>
         <p className="font-mono text-sm text-foreground">{cursorLabel}</p>
@@ -143,7 +190,7 @@ export function ReplayWorkspace() {
 
       <p className="sr-only" role="status">
         {playing ? "Playing" : "Paused"} at {cursorLabel}, bar {index + 1} of{" "}
-        {FIXTURE_BARS.length}.
+        {bars.length}.
       </p>
 
       <div className="grid flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
@@ -158,7 +205,7 @@ export function ReplayWorkspace() {
             <span>Exit</span>
           </div>
           <CandleChart
-            bars={FIXTURE_BARS}
+            bars={bars}
             markers={chartMarkers}
             cursorIndex={index}
             fitRevision={fitRevision}
@@ -173,7 +220,7 @@ export function ReplayWorkspace() {
             <dl className="flex flex-col gap-2 text-sm">
               <div className="flex items-baseline justify-between gap-3">
                 <dt className="text-muted-foreground">Symbol</dt>
-                <dd className="font-mono text-xs">MNQ</dd>
+                <dd className="font-mono text-xs">MNQ1!</dd>
               </div>
               <div className="flex items-baseline justify-between gap-3">
                 <dt className="text-muted-foreground">Timeframe</dt>
@@ -181,7 +228,7 @@ export function ReplayWorkspace() {
               </div>
               <div className="flex items-baseline justify-between gap-3">
                 <dt className="text-muted-foreground">Source</dt>
-                <dd className="text-right text-xs">Synthetic fixture</dd>
+                <dd className="text-right text-xs">TV Premium prodata</dd>
               </div>
             </dl>
             <Separator />
@@ -244,7 +291,7 @@ export function ReplayWorkspace() {
       <ReplayTransport
         playing={playing}
         index={index}
-        count={FIXTURE_BARS.length}
+        count={bars.length}
         cursorLabel={cursorLabel}
         onToggle={toggle}
         onScrub={scrub}
@@ -253,6 +300,7 @@ export function ReplayWorkspace() {
       />
 
       <StrategyEditor
+        bars={bars}
         onRun={(run) => {
           setScriptRun(run);
           if (run.ok) setFitRevision((current) => current + 1);

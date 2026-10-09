@@ -2,20 +2,20 @@
   "name": "mnq-replay",
   "version": "0.1.0",
   "private": true,
-  "description": "Personal MNQ 1-minute replay chart. The preview uses a synthetic fixture, not market data.",
+  "description": "Personal MNQ 1-minute replay chart with real CME_MINI:MNQ1! history.",
   "scripts": {
     "dev": "NODE_OPTIONS=--experimental-sqlite next dev --turbopack --hostname 0.0.0.0 --port 43123",
     "build": "next build",
     "preview": "npx --yes serve out -l 43124",
     "lint": "eslint",
-    "test": "node --experimental-sqlite --import tsx --test --test-concurrency=1 lib/dataset.test.ts lib/fixture-bars.test.ts lib/strategies/engine.test.ts",
+    "test": "node --experimental-sqlite --import tsx --test --test-concurrency=1 lib/strategies/engine.test.ts",
     "db:init": "node --experimental-sqlite scripts/init-db.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.4.0",
-    "lightweight-charts": "^4.2.2",
+    "lightweight-charts": "^4.2.3",
     "lucide-react": "^1.54.0",
     "next": "15.5.27",
     "react": "19.1.0",

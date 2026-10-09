@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { FIXTURE_BARS } from "@/lib/fixture-bars";
+import type { FixtureBar } from "@/lib/fixture-bars";
 import {
   DEFAULT_STRATEGY_SCRIPT,
   STRATEGY_STORAGE_KEY,
@@ -50,7 +50,13 @@ function scriptFromHash(): string | null {
   }
 }
 
-export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
+export function StrategyEditor({
+  bars,
+  onRun,
+}: {
+  bars: FixtureBar[];
+  onRun: (run: ScriptRun) => void;
+}) {
   const [script, setScript] = useState(DEFAULT_STRATEGY_SCRIPT);
   const [status, setStatus] = useState("Loading saved script…");
   const gutterRef = useRef<HTMLPreElement>(null);
@@ -62,7 +68,7 @@ export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
   scriptRef.current = script;
 
   function publish(source: string) {
-    const run = runStrategyScript(FIXTURE_BARS, source);
+    const run = runStrategyScript(bars, source);
     setAppliedSource(source);
     if (run.ok) {
       const closed = run.trades.filter((trade) => trade.exitIndex !== null).length;
@@ -80,7 +86,18 @@ export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
     const apply = (next: string) => {
       scriptRef.current = next;
       setScript(next);
-      publish(next);
+      const run = runStrategyScript(bars, next);
+      setAppliedSource(next);
+      if (run.ok) {
+        const closed = run.trades.filter((trade) => trade.exitIndex !== null).length;
+        const trades = run.trades.length === 1 ? "1 trade" : `${run.trades.length} trades`;
+        setStatus(
+          `Full period applied. ${trades}, ${closed} closed. Entries and exits are on the chart.`,
+        );
+      } else {
+        setStatus(run.error);
+      }
+      onRunRef.current(run);
     };
 
     const api: StrategyApi = {
@@ -113,7 +130,7 @@ export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
       window.removeEventListener("mnq-set-script", onCustom);
       delete window.mnqStrategy;
     };
-  }, []);
+  }, [bars]);
 
   useEffect(() => {
     const hashed = scriptFromHash();
@@ -126,7 +143,9 @@ export function StrategyEditor({ onRun }: { onRun: (run: ScriptRun) => void }) {
     scriptRef.current = next;
     setScript(next);
     publish(next);
-  }, []);
+    // Re-run when bars first arrive / change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bars]);
 
   useEffect(() => {
     if (skipPersistRef.current) {
