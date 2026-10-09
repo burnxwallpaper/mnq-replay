@@ -3,7 +3,7 @@ import type { OhlcvBar } from "@/lib/strategies/types";
 
 export const STRATEGY_STORAGE_KEY = "mnq-replay.strategyScript";
 
-/** Previous on-page default, so a saved copy of it upgrades to the EMA exit. */
+/** Previous on-page defaults. A saved copy of either one upgrades to the current script. */
 export const LEGACY_DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
 // bar: { ts, o, h, l, c, v }
 // ta.sma(i, length, "o" | "h" | "l" | "c" | "v")
@@ -20,7 +20,7 @@ if (bar.c > bar.o && body / span >= 0.55 && body >= 4 && bar.v > avgVol * 1.8) {
 return null
 `;
 
-export const DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
+export const EMA_EXIT_DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
 // bar: { ts, o, h, l, c, v }
 // ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
 // position: null, or { side, entry, stop, target, risk } while a trade is open
@@ -37,6 +37,36 @@ const avgVol = ta.sma(i, 20, "v")
 const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
 if (!position && bar.c > bar.o && body / span >= 0.55 && body >= 4 && bar.v > avgVol * 1.8) {
+  const risk = Math.max(bar.c - bar.l, 1)
+  return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * 2 }
+}
+return null
+`;
+
+export function isStaleDefaultScript(script: string) {
+  return script === LEGACY_DEFAULT_STRATEGY_SCRIPT || script === EMA_EXIT_DEFAULT_STRATEGY_SCRIPT;
+}
+
+export const DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
+// bar: { ts, o, h, l, c, v }
+// ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
+// position: null, or { side, entry, stop, target, risk } while a trade is open
+// Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
+// Entry fills at the signal close. One position at a time.
+// Impulse entries still target 2R. A close below the 5 EMA tightens that to 1R.
+// New longs are skipped from 22:00 through 08:59 Chicago time.
+
+const ema5 = ta.ema(i, 5, "c")
+if (position && position.side === "long" && bar.c < ema5) {
+  return { target: position.entry + position.risk }
+}
+
+const ct = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", hour: "2-digit", hourCycle: "h23" }).format(new Date(bar.ts)))
+const sessionOk = ct >= 9 && ct <= 21
+const avgVol = ta.sma(i, 20, "v")
+const body = Math.abs(bar.c - bar.o)
+const span = Math.max(bar.h - bar.l, 0.25)
+if (!position && sessionOk && bar.c > bar.o && body / span >= 0.55 && body >= 4 && bar.v > avgVol * 1.8) {
   const risk = Math.max(bar.c - bar.l, 1)
   return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * 2 }
 }
