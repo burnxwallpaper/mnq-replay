@@ -135,9 +135,14 @@ export function ReplayWorkspace() {
 
   const cursor = bars[index];
   const chartMarkers = (scriptRun?.ok ? scriptRun.markers : []).map((marker) => ({
-    ...marker,
     strategyId: "script",
+    barIndex: marker.barIndex,
+    visibleFromIndex: marker.visibleFromIndex,
+    kind: marker.kind,
+    win: marker.win,
     localIndex: marker.barIndex,
+    ...(typeof marker.price === "number" ? { price: marker.price } : {}),
+    ...(marker.side ? { side: marker.side } : {}),
   }));
   const entryCount = chartMarkers.filter((marker) => marker.kind === "entry").length;
   const exitCount = chartMarkers.filter((marker) => marker.kind === "exit").length;

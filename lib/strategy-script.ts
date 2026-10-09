@@ -23,6 +23,8 @@ export type ScriptMarker = {
   visibleFromIndex: number;
   kind: "signal" | "entry" | "exit";
   win: boolean | null;
+  price: number | null;
+  side: "long" | "short" | null;
 };
 
 export type ScriptTrade = {
@@ -150,6 +152,8 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
           visibleFromIndex: i,
           kind: "exit",
           win: reason === "target",
+          price: reason === "stop" ? open.stopPrice : open.targetPrice,
+          side: open.side,
         });
         trades.push(open);
         open = null;
@@ -173,12 +177,16 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
       visibleFromIndex: i,
       kind: "signal",
       win: null,
+      price: null,
+      side: signal.side,
     });
     markers.push({
       barIndex: i,
       visibleFromIndex: i,
       kind: "entry",
       win: null,
+      price: entry,
+      side: signal.side,
     });
     open = {
       side: signal.side,

@@ -12,7 +12,7 @@ import {
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { FixtureBar } from "@/lib/fixture-bars";
+import { formatFixturePrice, type FixtureBar } from "@/lib/fixture-bars";
 import type { ChartMarker } from "@/lib/strategies/types";
 
 const UP = "#3dd68c";
@@ -26,6 +26,21 @@ function timeToDate(time: Time): Date {
   if (typeof time === "number") return new Date(time * 1000);
   if (typeof time === "string") return new Date(time);
   return new Date(Date.UTC(time.year, time.month - 1, time.day));
+}
+
+type TradeCallout = {
+  key: string;
+  x: number;
+  y: number;
+  labelY: number;
+  text: string;
+  color: string;
+  align: "left" | "right";
+};
+
+function tradeVerb(kind: "entry" | "exit", side: "long" | "short" | undefined) {
+  const selling = kind === "entry" ? side === "short" : side !== "short";
+  return selling ? "Sell" : "Buy";
 }
 
 function formatTick(time: Time) {
@@ -61,6 +76,63 @@ export function CandleChart({
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const [span, setSpan] = useState("—");
   const [scale, setScale] = useState("—");
+  const [callouts, setCallouts] = useState<TradeCallout[]>([]);
+  const markersRef = useRef(markers);
+  const barsRef = useRef(bars);
+  const calloutSigRef = useRef("");
+  markersRef.current = markers;
+  barsRef.current = bars;
+
+  const placeCallouts = () => {
+    const chart = chartRef.current;
+    const candles = candleRef.current;
+    const frame = frameRef.current;
+    if (!chart || !candles || !frame) return;
+    const width = frame.clientWidth;
+    const height = frame.clientHeight;
+    const placed: TradeCallout[] = [];
+    const occupied: { x: number; y: number }[] = [];
+    for (const marker of markersRef.current) {
+      if (marker.kind !== "entry" && marker.kind !== "exit") continue;
+      if (typeof marker.price !== "number") continue;
+      const bar = barsRef.current[marker.localIndex];
+      if (!bar) continue;
+      const xRaw = chart.timeScale().timeToCoordinate(unix(bar.ts));
+      const yRaw = candles.priceToCoordinate(marker.price);
+      if (xRaw == null || yRaw == null) continue;
+      const x = Number(xRaw);
+      const y = Number(yRaw);
+      if (x < 8 || x > width - 8 || y < 8 || y > height - 8) continue;
+      if (
+        occupied.length >= 48 &&
+        occupied.some((item) => Math.abs(item.x - x) < 18 && Math.abs(item.y - y) < 12)
+      ) {
+        continue;
+      }
+      occupied.push({ x, y });
+      const color = marker.kind === "entry" || marker.win ? UP : DOWN;
+      placed.push({
+        key: `${marker.kind}-${marker.localIndex}`,
+        x,
+        y,
+        labelY: y,
+        text: `${tradeVerb(marker.kind, marker.side)} ${formatFixturePrice(marker.price)}`,
+        color,
+        align: x > width - 168 ? "right" : "left",
+      });
+    }
+    const signature = placed
+      .map(
+        (item) =>
+          `${item.key}:${Math.round(item.x)}:${Math.round(item.y)}:${Math.round(item.labelY)}:${item.align}`,
+      )
+      .join("|");
+    if (signature === calloutSigRef.current) return;
+    calloutSigRef.current = signature;
+    setCallouts(placed);
+  };
+  const placeRef = useRef(placeCallouts);
+  placeRef.current = placeCallouts;
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -144,13 +216,16 @@ export function CandleChart({
         const bot = Math.min(hi, lo);
         setScale(`${bot.toFixed(2)} – ${top.toFixed(2)}`);
       }
+      placeRef.current();
     };
 
     chart.timeScale().subscribeVisibleLogicalRangeChange(readScales);
+    frame.addEventListener("pointermove", readScales);
     frame.addEventListener("pointerup", readScales);
     frame.addEventListener("wheel", readScales, { passive: true });
 
     return () => {
+      frame.removeEventListener("pointermove", readScales);
       frame.removeEventListener("pointerup", readScales);
       frame.removeEventListener("wheel", readScales);
       chart.remove();
@@ -227,6 +302,9 @@ export function CandleChart({
       });
     }
     candles.setMarkers(next);
+    placeRef.current();
+    const frame = requestAnimationFrame(() => placeRef.current());
+    return () => cancelAnimationFrame(frame);
   }, [bars, markers, cursorIndex]);
 
   return (
@@ -237,6 +315,39 @@ export function CandleChart({
         role="img"
         aria-label="MNQ 1-minute candlestick chart with volume. Drag the chart to pan. Drag the right price scale up or down to zoom."
       />
+      <div id="trade-callouts" className="pointer-events-none absolute inset-0 z-20">
+        {callouts.map((callout) => (
+          <div key={callout.key} data-trade-label={callout.text}>
+            <span
+              className="absolute"
+              style={{
+                left: callout.align === "right" ? callout.x - 40 : callout.x,
+                top: callout.y,
+                width: 40,
+                height: 2,
+                background: callout.color,
+                transform: "translateY(-1px)",
+              }}
+            />
+            <span
+              className="absolute rounded-sm px-1 font-mono text-[10px] leading-4"
+              style={{
+                left: callout.align === "right" ? callout.x - 44 : callout.x + 44,
+                top: callout.labelY,
+                color: callout.color,
+                background: "rgba(18,21,28,0.88)",
+                boxShadow: `inset 0 0 0 1px ${callout.color}`,
+                transform:
+                  callout.align === "right"
+                    ? "translate(-100%, -50%)"
+                    : "translateY(-50%)",
+              }}
+            >
+              {callout.text}
+            </span>
+          </div>
+        ))}
+      </div>
       <div className="pointer-events-none absolute top-8 right-24 z-10 text-right font-mono text-[11px] text-[#d5deea]">
         <div id="chart-time">{span}</div>
         <div id="chart-price">Price {scale}</div>

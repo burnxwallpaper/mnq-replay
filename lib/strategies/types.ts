@@ -39,6 +39,9 @@ export type ChartMarker = {
   visibleFromIndex: number;
   kind: MarkerKind;
   win: boolean | null;
+  /** Fill price for an entry or exit arrow. */
+  price?: number;
+  side?: "long" | "short";
 };
 
 export type Trade = {
