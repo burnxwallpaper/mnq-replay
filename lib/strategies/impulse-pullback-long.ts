@@ -52,6 +52,7 @@ function limitTouched(bar: OhlcvBar, limit: number, stop: number) {
   return bar.l <= limit && bar.h >= limit;
 }
 
+/** Same gap-through OHLC fills as strategy-script resolveExitFill (long only). */
 function resolveLongExit(
   bar: OhlcvBar,
   stop: number,

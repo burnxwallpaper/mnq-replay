@@ -40,6 +40,8 @@ type TradeCallout = {
   color: string;
   textColor: string;
   align: "left" | "right";
+  /** Entry/exit arrow drawn on the fill-price callout, not the wick. */
+  kind: "entry" | "exit";
 };
 
 function tradeVerb(kind: "entry" | "exit", side: "long" | "short" | undefined) {
@@ -137,6 +139,7 @@ export function CandleChart({
         color,
         textColor: buyEntry ? "#ffffff" : color,
         align: x > width - 168 ? "right" : "left",
+        kind: marker.kind,
       });
     }
     const signature = placed
@@ -384,6 +387,13 @@ export function CandleChart({
     for (const marker of markers) {
       const bar = bars[marker.localIndex];
       if (!bar) continue;
+      // Entry/exit with a fill price use the callout triangle at marker.price.
+      if (
+        (marker.kind === "entry" || marker.kind === "exit") &&
+        typeof marker.price === "number"
+      ) {
+        continue;
+      }
       const exit = marker.kind === "exit";
       next.push({
         time: unix(bar.ts),
@@ -424,6 +434,25 @@ export function CandleChart({
       <div id="trade-callouts" className="pointer-events-none absolute inset-0 z-20">
         {callouts.map((callout) => (
           <div key={callout.key} data-trade-label={callout.text}>
+            <span
+              className="absolute"
+              style={{
+                left: callout.x,
+                top: callout.y,
+                width: 0,
+                height: 0,
+                borderLeft: "5px solid transparent",
+                borderRight: "5px solid transparent",
+                borderTop:
+                  callout.kind === "exit" ? `8px solid ${callout.color}` : undefined,
+                borderBottom:
+                  callout.kind === "entry" ? `8px solid ${callout.color}` : undefined,
+                transform:
+                  callout.kind === "exit"
+                    ? "translate(-50%, -2px)"
+                    : "translate(-50%, calc(-100% + 2px))",
+              }}
+            />
             <span
               className="absolute"
               style={{

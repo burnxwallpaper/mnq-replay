@@ -166,6 +166,28 @@ function readSignal(value: unknown): {
   return { side, stop, target };
 }
 
+
+/** Realistic OHLC fill: gap-through at open, else level if touched. Prefer stop if both. */
+function resolveExitFill(
+  bar: OhlcvBar,
+  side: "long" | "short",
+  stop: number,
+  target: number,
+): { price: number; reason: "stop" | "target" } | null {
+  if (side === "long") {
+    if (bar.o <= stop) return { price: bar.o, reason: "stop" };
+    if (bar.o >= target) return { price: bar.o, reason: "target" };
+    if (bar.l <= stop) return { price: stop, reason: "stop" };
+    if (bar.h >= target) return { price: target, reason: "target" };
+    return null;
+  }
+  if (bar.o >= stop) return { price: bar.o, reason: "stop" };
+  if (bar.o <= target) return { price: bar.o, reason: "target" };
+  if (bar.h >= stop) return { price: stop, reason: "stop" };
+  if (bar.l <= target) return { price: target, reason: "target" };
+  return null;
+}
+
 function compile(source: string): BarFn {
   const created: unknown = new Function(
     "bar",
@@ -247,22 +269,17 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
         const nextTarget = readTarget(managed);
         if (nextTarget !== null) open.targetPrice = nextTarget;
       }
-      const hitStop =
-        open.side === "long" ? bar.l <= open.stopPrice : bar.h >= open.stopPrice;
-      const hitTarget =
-        open.side === "long" ? bar.h >= open.targetPrice : bar.l <= open.targetPrice;
-      if (hitStop || hitTarget) {
-        const reason = hitStop ? "stop" : "target";
-        const price = reason === "stop" ? open.stopPrice : open.targetPrice;
+      const exit = resolveExitFill(bar, open.side, open.stopPrice, open.targetPrice);
+      if (exit) {
         open.exitIndex = i;
-        open.exitReason = reason;
-        open.exitPrice = price;
+        open.exitReason = exit.reason;
+        open.exitPrice = exit.price;
         markers.push({
           barIndex: i,
           visibleFromIndex: i,
           kind: "exit",
-          win: reason === "target",
-          price,
+          win: exit.reason === "target",
+          price: exit.price,
           side: open.side,
         });
         trades.push(open);
