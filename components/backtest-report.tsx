@@ -4,6 +4,15 @@ import type {
   EquitySeries,
   MultiBacktestReport,
 } from "@/lib/strategy-script";
+import { STARTING_NET_ASSET } from "@/lib/strategy-script";
+
+/** Absolute net-asset dollars (no forced +). */
+function formatAsset(value: number) {
+  return `$${value.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
 
 function formatPnl(value: number) {
   const sign = value < 0 ? "-" : value > 0 ? "+" : "";
@@ -60,8 +69,8 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
   const height = 148;
   const padX = 6;
   const padY = 10;
-  let min = 0;
-  let max = 0;
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
   let t0 = Number.POSITIVE_INFINITY;
   let t1 = Number.NEGATIVE_INFINITY;
   for (const item of series) {
@@ -76,6 +85,10 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
     t0 = 0;
     t1 = 0;
   }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    min = STARTING_NET_ASSET - 1;
+    max = STARTING_NET_ASSET + 1;
+  }
   if (min === max) {
     min -= 1;
     max += 1;
@@ -85,12 +98,12 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
     span <= 0 ? padX : padX + ((ts - t0) / span) * (width - padX * 2);
   const yOf = (value: number) =>
     padY + (1 - (value - min) / (max - min)) * (height - padY * 2);
-  const zeroY = yOf(0);
+  const baselineY = yOf(STARTING_NET_ASSET);
   const primary = series.find((item) => item.id === "combined") ?? series[0];
   const areaLine = primary ? linePath(primary.equity, xOf, yOf) : "";
   const area =
     primary && primary.equity.length > 0 && areaLine
-      ? `${areaLine} L ${xOf(primary.equity[primary.equity.length - 1].ts).toFixed(1)} ${zeroY.toFixed(1)} L ${xOf(primary.equity[0].ts).toFixed(1)} ${zeroY.toFixed(1)} Z`
+      ? `${areaLine} L ${xOf(primary.equity[primary.equity.length - 1].ts).toFixed(1)} ${baselineY.toFixed(1)} L ${xOf(primary.equity[0].ts).toFixed(1)} ${baselineY.toFixed(1)} Z`
       : "";
 
   return (
@@ -99,13 +112,13 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
       viewBox={`0 0 ${width} ${height}`}
       className="h-36 w-full"
       role="img"
-      aria-label={`Equity curves ending ${formatPnl(primary?.endingEquity ?? 0)}`}
+      aria-label={`Net asset curves ending ${formatAsset(primary?.endingEquity ?? STARTING_NET_ASSET)}`}
     >
       <line
         x1={padX}
         x2={width - padX}
-        y1={zeroY}
-        y2={zeroY}
+        y1={baselineY}
+        y2={baselineY}
         stroke="rgba(213,222,234,0.35)"
         strokeDasharray="3 3"
       />
@@ -126,7 +139,7 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
         );
       })}
       <text x={padX} y={12} fill="#9aa8b8" fontSize={11} fontFamily="ui-monospace, monospace">
-        {formatPnl(max)}
+        {formatAsset(max)}
       </text>
       <text
         x={padX}
@@ -135,7 +148,7 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
         fontSize={11}
         fontFamily="ui-monospace, monospace"
       >
-        {formatPnl(min)}
+        {formatAsset(min)}
       </text>
     </svg>
   );
@@ -154,6 +167,38 @@ function Stat({
     <div id={id} className="rounded-lg bg-foreground/5 px-3 py-2">
       <dt className="text-[10px] tracking-wide text-muted-foreground uppercase">{label}</dt>
       <dd className="mt-1 font-mono text-sm">{value}</dd>
+    </div>
+  );
+}
+
+function AssetSummary({
+  idPrefix,
+  name,
+  color,
+  finalAsset,
+  peak,
+  trough,
+}: {
+  idPrefix: string;
+  name: string;
+  color?: string;
+  finalAsset: number;
+  peak: number;
+  trough: number;
+}) {
+  return (
+    <div id={`${idPrefix}-asset-summary`} className="flex flex-col gap-2">
+      <h3
+        className="font-mono text-xs tracking-wide uppercase"
+        style={color ? { color } : undefined}
+      >
+        {name}
+      </h3>
+      <dl className="grid grid-cols-3 gap-2">
+        <Stat id={`${idPrefix}-final-asset`} label="Final asset" value={formatAsset(finalAsset)} />
+        <Stat id={`${idPrefix}-peak-asset`} label="Hist. high" value={formatAsset(peak)} />
+        <Stat id={`${idPrefix}-trough-asset`} label="Hist. low" value={formatAsset(trough)} />
+      </dl>
     </div>
   );
 }
@@ -233,6 +278,7 @@ export function BacktestReport({ report }: { report: MultiBacktestReport | null 
   const start = stats.equity[0];
   const end = stats.equity[stats.equity.length - 1];
   const multi = perStrategy.length > 1;
+  const combinedSeries = series.find((item) => item.id === "combined");
 
   return (
     <section
@@ -241,10 +287,13 @@ export function BacktestReport({ report }: { report: MultiBacktestReport | null 
       className="flex flex-col gap-3 rounded-xl bg-[oklch(0.145_0.016_255)] px-3 py-3 ring-1 ring-foreground/10"
     >
       <div className="flex flex-wrap items-baseline justify-between gap-3">
-        <h2 className="font-mono text-sm font-medium">Equity</h2>
+        <h2 className="font-mono text-sm font-medium">Net asset</h2>
         <p id="equity-ending" className="font-mono text-sm">
-          {formatPnl(stats.endingEquity)}
-          <span className="text-muted-foreground"> · $2/point · full period</span>
+          {formatAsset(stats.endingEquity)}
+          <span className="text-muted-foreground">
+            {" "}
+            · start {formatAsset(STARTING_NET_ASSET)} · $2/R · full period
+          </span>
         </p>
       </div>
       <div
@@ -262,7 +311,7 @@ export function BacktestReport({ report }: { report: MultiBacktestReport | null 
               }}
             />
             <span style={{ color: item.color }}>{item.name}</span>
-            <span>{formatPnl(item.endingEquity)}</span>
+            <span>{formatAsset(item.endingEquity)}</span>
           </span>
         ))}
       </div>
@@ -271,11 +320,36 @@ export function BacktestReport({ report }: { report: MultiBacktestReport | null 
         <span>{start ? shortDate(start.ts) : "—"}</span>
         <span>{end ? `${shortDate(end.ts)} UTC` : "—"}</span>
       </p>
+
+      <div id="asset-summaries" className="flex flex-col gap-3">
+        {multi && combinedSeries ? (
+          <AssetSummary
+            idPrefix="stat-combined"
+            name="Combined"
+            color={combinedSeries.color}
+            finalAsset={combinedSeries.endingEquity}
+            peak={combinedSeries.peakEquity}
+            trough={combinedSeries.troughEquity}
+          />
+        ) : null}
+        {perStrategy.map((item) => (
+          <AssetSummary
+            key={item.id}
+            idPrefix={multi ? `stat-${item.id}` : "stat"}
+            name={item.name}
+            color={item.color}
+            finalAsset={item.stats.endingEquity}
+            peak={item.stats.peakEquity}
+            trough={item.stats.troughEquity}
+          />
+        ))}
+      </div>
+
       {multi ? (
         <div className="flex flex-col gap-4">
           <div>
             <h3 className="mb-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              Combined
+              Combined stats
             </h3>
             <StatsGrid stats={stats} idPrefix="stat" />
           </div>
@@ -285,7 +359,7 @@ export function BacktestReport({ report }: { report: MultiBacktestReport | null 
                 className="mb-2 font-mono text-xs tracking-wide uppercase"
                 style={{ color: item.color }}
               >
-                {item.name}
+                {item.name} stats
               </h3>
               <StatsGrid stats={item.stats} idPrefix={`stat-${item.id}`} />
             </div>

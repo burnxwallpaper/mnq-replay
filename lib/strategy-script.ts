@@ -369,6 +369,9 @@ export function runStrategyScript(bars: OhlcvBar[], source: string, strategyId =
 
 export const MNQ_POINT_VALUE = 2;
 
+/** Starting net asset for equity curves ($2/R PnL is added on top). */
+export const STARTING_NET_ASSET = 10_000;
+
 export type EquityPoint = {
   ts: number;
   equity: number;
@@ -387,6 +390,11 @@ export type BacktestStats = {
   signalIntervalMs: number | null;
   equity: EquityPoint[];
   endingEquity: number;
+  /** Peak of the equity curve (includes starting capital). */
+  peakEquity: number;
+  /** Trough of the equity curve (includes starting capital). */
+  troughEquity: number;
+  startingEquity: number;
 };
 
 function isClosed(
@@ -432,8 +440,8 @@ export function summarizeBacktest(
     }
   }
 
-  const equity: EquityPoint[] = [{ ts: bars[0].ts, equity: 0 }];
-  let cursorEquity = 0;
+  const equity: EquityPoint[] = [{ ts: bars[0].ts, equity: STARTING_NET_ASSET }];
+  let cursorEquity = STARTING_NET_ASSET;
   for (const trade of closed) {
     cursorEquity += tradePnl(trade, trade.exitPrice);
     equity.push({ ts: bars[trade.exitIndex].ts, equity: cursorEquity });
@@ -447,10 +455,12 @@ export function summarizeBacktest(
     equity.push({ ts: lastBar.ts, equity: cursorEquity });
   }
 
-  let peak = 0;
+  let peak = equity[0]?.equity ?? STARTING_NET_ASSET;
+  let trough = peak;
   let maxDrawdown = 0;
   for (const point of equity) {
     if (point.equity > peak) peak = point.equity;
+    if (point.equity < trough) trough = point.equity;
     const drop = peak - point.equity;
     if (drop > maxDrawdown) maxDrawdown = drop;
   }
@@ -480,6 +490,9 @@ export function summarizeBacktest(
     signalIntervalMs: signalCount === 0 || spanMs <= 0 ? null : spanMs / signalCount,
     equity,
     endingEquity: cursorEquity,
+    peakEquity: peak,
+    troughEquity: trough,
+    startingEquity: STARTING_NET_ASSET,
   };
 }
 
@@ -537,6 +550,8 @@ export type EquitySeries = {
   color: string;
   equity: EquityPoint[];
   endingEquity: number;
+  peakEquity: number;
+  troughEquity: number;
 };
 
 export type MultiBacktestReport = {
@@ -592,6 +607,8 @@ export function summarizeMultiBacktest(
     color: item.color,
     equity: item.stats.equity,
     endingEquity: item.stats.endingEquity,
+    peakEquity: item.stats.peakEquity,
+    troughEquity: item.stats.troughEquity,
   }));
 
   const merged = mergeScriptRuns(okNamed);
@@ -603,6 +620,8 @@ export function summarizeMultiBacktest(
       color: STRATEGY_COLORS.combined,
       equity: combinedStats.equity,
       endingEquity: combinedStats.endingEquity,
+      peakEquity: combinedStats.peakEquity,
+      troughEquity: combinedStats.troughEquity,
     });
   }
 
