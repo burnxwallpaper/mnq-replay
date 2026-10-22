@@ -15,10 +15,20 @@ import {
   loadMnqBars,
   type FixtureBar,
 } from "@/lib/fixture-bars";
-import { scoreScript, summarizeBacktest, type ScriptRun } from "@/lib/strategy-script";
+import {
+  DEFAULT_SHORT_STRATEGY_SCRIPT,
+  STRATEGY_COLORS,
+  mergeScriptRuns,
+  runStrategyScript,
+  scoreScript,
+  summarizeMultiBacktest,
+  type NamedScriptRun,
+  type ScriptRun,
+} from "@/lib/strategy-script";
 
 const PLAY_MS = 180;
 const INITIAL_VISIBLE = 180;
+const RUNNERS_STORAGE_KEY = "mnq-replay.enabledRunners";
 
 function formatR(value: number) {
   const sign = value > 0 ? "+" : "";
@@ -30,15 +40,52 @@ function formatPnl(value: number) {
   return `${sign}$${Math.abs(value).toFixed(2)}`;
 }
 
+function readEnabledRunners(): { long: boolean; short: boolean } {
+  try {
+    const raw = window.localStorage.getItem(RUNNERS_STORAGE_KEY);
+    if (!raw) return { long: true, short: false };
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return { long: true, short: false };
+    const record = parsed as Record<string, unknown>;
+    return {
+      long: record.long !== false,
+      short: record.short === true,
+    };
+  } catch {
+    return { long: true, short: false };
+  }
+}
+
+function writeEnabledRunners(long: boolean, short: boolean) {
+  try {
+    window.localStorage.setItem(RUNNERS_STORAGE_KEY, JSON.stringify({ long, short }));
+  } catch {
+    // Ignore private-mode storage failures.
+  }
+}
+
 export function ReplayWorkspace() {
   const [bars, setBars] = useState<FixtureBar[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [scriptRun, setScriptRun] = useState<ScriptRun | null>(null);
+  const [longSource, setLongSource] = useState<string | null>(null);
+  const [longRun, setLongRun] = useState<ScriptRun | null>(null);
+  const [longEnabled, setLongEnabled] = useState(true);
+  const [shortEnabled, setShortEnabled] = useState(false);
   const [fitRevision, setFitRevision] = useState(0);
   const lastIndex = bars ? bars.length - 1 : 0;
   const toggleRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    const saved = readEnabledRunners();
+    setLongEnabled(saved.long);
+    setShortEnabled(saved.short);
+  }, []);
+
+  useEffect(() => {
+    writeEnabledRunners(longEnabled, shortEnabled);
+  }, [longEnabled, shortEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,15 +155,48 @@ export function ReplayWorkspace() {
     setIndex((current) => Math.min(lastIndex, Math.max(0, current + delta)));
   }
 
+  const namedRuns: NamedScriptRun[] = useMemo(() => {
+    if (!bars) return [];
+    const list: NamedScriptRun[] = [];
+    if (longEnabled) {
+      const run =
+        longRun ??
+        (longSource ? runStrategyScript(bars, longSource, "long") : null);
+      if (run) {
+        list.push({
+          id: "long",
+          name: "Long",
+          color: STRATEGY_COLORS.long,
+          run,
+        });
+      }
+    }
+    if (shortEnabled) {
+      list.push({
+        id: "short",
+        name: "Short",
+        color: STRATEGY_COLORS.short,
+        run: runStrategyScript(bars, DEFAULT_SHORT_STRATEGY_SCRIPT, "short"),
+      });
+    }
+    return list;
+  }, [bars, longEnabled, shortEnabled, longRun, longSource]);
+
+  const mergedRun = useMemo(() => {
+    if (namedRuns.length === 0) return null;
+    return mergeScriptRuns(namedRuns);
+  }, [namedRuns]);
+
   const periodEnd = bars ? bars.length - 1 : 0;
   const score = useMemo(() => {
-    if (!bars || !scriptRun?.ok) return null;
-    return scoreScript(scriptRun.trades, bars, periodEnd);
-  }, [scriptRun, periodEnd, bars]);
-  const backtestStats = useMemo(() => {
-    if (!bars || !scriptRun?.ok) return null;
-    return summarizeBacktest(scriptRun, bars);
-  }, [scriptRun, bars]);
+    if (!bars || !mergedRun?.ok) return null;
+    return scoreScript(mergedRun.trades, bars, periodEnd);
+  }, [mergedRun, periodEnd, bars]);
+  const multiReport = useMemo(() => {
+    if (!bars || namedRuns.length === 0) return null;
+    if (namedRuns.some((item) => !item.run.ok)) return null;
+    return summarizeMultiBacktest(namedRuns, bars);
+  }, [namedRuns, bars]);
 
   if (loadError) {
     return (
@@ -139,8 +219,9 @@ export function ReplayWorkspace() {
   }
 
   const cursor = bars[index];
-  const chartMarkers = (scriptRun?.ok ? scriptRun.markers : []).map((marker) => ({
-    strategyId: "script",
+  const bothRunners = longEnabled && shortEnabled;
+  const chartMarkers = (mergedRun?.ok ? mergedRun.markers : []).map((marker) => ({
+    strategyId: marker.strategyId,
     barIndex: marker.barIndex,
     visibleFromIndex: marker.visibleFromIndex,
     kind: marker.kind,
@@ -151,7 +232,7 @@ export function ReplayWorkspace() {
   }));
   const entryCount = chartMarkers.filter((marker) => marker.kind === "entry").length;
   const exitCount = chartMarkers.filter((marker) => marker.kind === "exit").length;
-  const tradeCount = scriptRun?.ok ? scriptRun.trades.length : 0;
+  const tradeCount = mergedRun?.ok ? mergedRun.trades.length : 0;
   const tradeLabel = tradeCount === 1 ? "1 trade" : `${tradeCount} trades`;
   const entryLabel = entryCount === 1 ? "1 entry" : `${entryCount} entries`;
   const exitLabel = exitCount === 1 ? "1 exit" : `${exitCount} exits`;
@@ -165,6 +246,7 @@ export function ReplayWorkspace() {
     ["C", formatFixturePrice(cursor.c)],
     ["V", cursor.v.toLocaleString("en-US")],
   ] as const;
+  const runnerError = namedRuns.find((item) => !item.run.ok);
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[1440px] flex-col gap-3 p-3 sm:p-4">
@@ -190,11 +272,50 @@ export function ReplayWorkspace() {
         <p className="font-mono text-sm text-foreground">{cursorLabel}</p>
       </header>
 
+      <div
+        id="strategy-runners"
+        className="flex flex-wrap items-center gap-3 rounded-lg bg-foreground/5 px-3 py-2 font-mono text-sm"
+      >
+        <span className="text-xs tracking-wide text-muted-foreground uppercase">
+          Runners
+        </span>
+        <label className="inline-flex cursor-pointer items-center gap-2">
+          <input
+            id="runner-long"
+            type="checkbox"
+            checked={longEnabled}
+            onChange={(event) => {
+              const next = event.target.checked;
+              if (!next && !shortEnabled) return;
+              setLongEnabled(next);
+              setFitRevision((current) => current + 1);
+            }}
+          />
+          <span style={{ color: STRATEGY_COLORS.long }}>Long</span>
+          <span className="text-xs text-muted-foreground">(editor)</span>
+        </label>
+        <label className="inline-flex cursor-pointer items-center gap-2">
+          <input
+            id="runner-short"
+            type="checkbox"
+            checked={shortEnabled}
+            onChange={(event) => {
+              const next = event.target.checked;
+              if (!next && !longEnabled) return;
+              setShortEnabled(next);
+              setFitRevision((current) => current + 1);
+            }}
+          />
+          <span style={{ color: STRATEGY_COLORS.short }}>Short</span>
+          <span className="text-xs text-muted-foreground">(built-in inverse)</span>
+        </label>
+      </div>
+
       <p id="backtest-summary" className="font-mono text-sm">
         {score
           ? `Full period · ${tradeLabel} · ${formatR(score.totalR)} · ${formatPnl(score.totalPnl)} · ${score.wins} wins · ${score.losses} losses · ${entryLabel} · ${exitLabel}`
-          : scriptRun && !scriptRun.ok
-            ? scriptRun.error
+          : runnerError && !runnerError.run.ok
+            ? `${runnerError.name}: ${runnerError.run.error}`
             : "Full period backtest appears after Apply strategy."}
       </p>
 
@@ -212,7 +333,8 @@ export function ReplayWorkspace() {
           <div className="pointer-events-none absolute top-3 left-3 z-10 flex gap-3 text-[10px] tracking-wide text-muted-foreground uppercase">
             <span>Drag to pan</span>
             <span className="text-[oklch(0.84_0.14_88)]">Signal</span>
-            <span className="text-[oklch(0.78_0.15_155)]">Entry</span>
+            <span className="text-[oklch(0.78_0.15_155)]">Long</span>
+            <span className="text-[#7aa2ff]">Short</span>
             <span>Exit</span>
             <span className="text-[#39d0ff]">EMA 5</span>
           </div>
@@ -221,9 +343,10 @@ export function ReplayWorkspace() {
             markers={chartMarkers}
             cursorIndex={index}
             fitRevision={fitRevision}
+            labelStrategies={bothRunners}
           />
         </section>
-        <BacktestReport stats={backtestStats} />
+        <BacktestReport report={multiReport} />
         </div>
 
         <Card className="h-fit">
@@ -291,8 +414,16 @@ export function ReplayWorkspace() {
                       {score.wins} · {score.losses} losses
                     </dd>
                   </div>
+                  {multiReport
+                    ? multiReport.perStrategy.map((item) => (
+                        <div key={item.id} className="flex justify-between gap-3">
+                          <dt style={{ color: item.color }}>{item.name}</dt>
+                          <dd>{formatPnl(item.stats.endingEquity)}</dd>
+                        </div>
+                      ))
+                    : null}
                 </dl>
-              ) : scriptRun && !scriptRun.ok ? (
+              ) : runnerError && !runnerError.run.ok ? (
                 <p className="text-sm text-muted-foreground">Script has an error.</p>
               ) : (
                 <p className="text-sm text-muted-foreground">Running script.</p>
@@ -315,18 +446,18 @@ export function ReplayWorkspace() {
 
       <StrategyEditor
         bars={bars}
-        onRun={(run) => {
-          setScriptRun(run);
+        onApply={(source, run) => {
+          setLongSource(source);
+          setLongRun(run);
           if (run.ok) setFitRevision((current) => current + 1);
         }}
       />
 
       <p className="text-xs text-muted-foreground">
-        Apply strategy draws entries and exits for the whole loaded series,
-        the equity curve, and the stats below the chart. Replay only moves the
-        cursor. Drag the chart to pan, and drag the price scale to zoom.
-        Dates and times are on the bottom axis. Volume is the histogram
-        underneath. Script edits stay in this browser.
+        Toggle Long and/or Short above the chart. Long uses the editor script;
+        Short uses the built-in inverse impulse sample. Both can run on the same
+        bars with separate books. Equity shows one line per runner plus Combined
+        when both are on. Replay only moves the cursor.
       </p>
     </main>
   );

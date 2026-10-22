@@ -65,16 +65,22 @@ function formatTick(time: Time) {
   return `${day} ${clock}`;
 }
 
+const SHORT_UP = "#7aa2ff";
+const SHORT_DOWN = "#c084fc";
+
 export function CandleChart({
   bars,
   markers = [],
   cursorIndex = null,
   fitRevision = 0,
+  labelStrategies = false,
 }: {
   bars: FixtureBar[];
   markers?: (ChartMarker & { localIndex: number })[];
   cursorIndex?: number | null;
   fitRevision?: number;
+  /** Prefix callouts with L/S when long and short runners both show. */
+  labelStrategies?: boolean;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -98,8 +104,10 @@ export function CandleChart({
   const markersRef = useRef(markers);
   const barsRef = useRef(bars);
   const calloutSigRef = useRef("");
+  const labelStrategiesRef = useRef(labelStrategies);
   markersRef.current = markers;
   barsRef.current = bars;
+  labelStrategiesRef.current = labelStrategies;
 
   const placeCallouts = () => {
     const chart = chartRef.current;
@@ -128,14 +136,28 @@ export function CandleChart({
         continue;
       }
       occupied.push({ x, y });
-      const color = marker.kind === "entry" || marker.win ? UP : DOWN;
+      const shortSide = marker.side === "short" || marker.strategyId === "short";
+      const color =
+        marker.kind === "entry" || marker.win
+          ? shortSide
+            ? SHORT_UP
+            : UP
+          : shortSide
+            ? SHORT_DOWN
+            : DOWN;
       const buyEntry = marker.kind === "entry" && marker.side !== "short";
+      const prefix =
+        labelStrategiesRef.current
+          ? shortSide
+            ? "S "
+            : "L "
+          : "";
       placed.push({
-        key: `${marker.kind}-${marker.localIndex}`,
+        key: `${marker.strategyId}-${marker.kind}-${marker.localIndex}-${marker.side ?? ""}`,
         x,
         y,
         labelY: y,
-        text: `${tradeVerb(marker.kind, marker.side)} ${formatFixturePrice(marker.price)}`,
+        text: `${prefix}${tradeVerb(marker.kind, marker.side)} ${formatFixturePrice(marker.price)}`,
         color,
         textColor: buyEntry ? "#ffffff" : color,
         align: x > width - 168 ? "right" : "left",
@@ -395,17 +417,26 @@ export function CandleChart({
         continue;
       }
       const exit = marker.kind === "exit";
+      const shortSide = marker.side === "short" || marker.strategyId === "short";
       next.push({
         time: unix(bar.ts),
         position: exit ? "aboveBar" : "belowBar",
         color:
           marker.kind === "signal"
-            ? "#e2b340"
+            ? shortSide
+              ? "#9bb7ff"
+              : "#e2b340"
             : marker.kind === "entry"
-              ? UP
+              ? shortSide
+                ? SHORT_UP
+                : UP
               : marker.win
-                ? UP
-                : DOWN,
+                ? shortSide
+                  ? SHORT_UP
+                  : UP
+                : shortSide
+                  ? SHORT_DOWN
+                  : DOWN,
         shape: exit ? "arrowDown" : "arrowUp",
       });
     }
@@ -421,7 +452,7 @@ export function CandleChart({
     placeRef.current();
     const frame = requestAnimationFrame(() => placeRef.current());
     return () => cancelAnimationFrame(frame);
-  }, [bars, markers, cursorIndex]);
+  }, [bars, markers, cursorIndex, labelStrategies]);
 
   return (
     <div className="absolute inset-0">

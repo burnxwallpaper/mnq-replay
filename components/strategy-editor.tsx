@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { FixtureBar } from "@/lib/fixture-bars";
 import {
+  DEFAULT_SHORT_STRATEGY_SCRIPT,
   DEFAULT_STRATEGY_SCRIPT,
   STRATEGY_STORAGE_KEY,
   isStaleDefaultScript,
@@ -53,52 +54,42 @@ function scriptFromHash(): string | null {
 
 export function StrategyEditor({
   bars,
-  onRun,
+  onApply,
 }: {
   bars: FixtureBar[];
-  onRun: (run: ScriptRun) => void;
+  /** Fires with the editor source whenever Apply / auto-load runs the long slot. */
+  onApply: (source: string, run: ScriptRun) => void;
 }) {
   const [script, setScript] = useState(DEFAULT_STRATEGY_SCRIPT);
   const [status, setStatus] = useState("Loading saved script…");
   const gutterRef = useRef<HTMLPreElement>(null);
-  const onRunRef = useRef(onRun);
+  const onApplyRef = useRef(onApply);
   const scriptRef = useRef(script);
   const skipPersistRef = useRef(true);
   const [appliedSource, setAppliedSource] = useState<string | null>(null);
-  onRunRef.current = onRun;
+  onApplyRef.current = onApply;
   scriptRef.current = script;
 
   function publish(source: string) {
-    const run = runStrategyScript(bars, source);
+    const run = runStrategyScript(bars, source, "long");
     setAppliedSource(source);
     if (run.ok) {
       const closed = run.trades.filter((trade) => trade.exitIndex !== null).length;
       const trades = run.trades.length === 1 ? "1 trade" : `${run.trades.length} trades`;
       setStatus(
-        `Full period applied. ${trades}, ${closed} closed. Entries and exits are on the chart.`,
+        `Long slot applied. ${trades}, ${closed} closed. Enabled runners refresh the chart.`,
       );
     } else {
       setStatus(run.error);
     }
-    onRunRef.current(run);
+    onApplyRef.current(source, run);
   }
 
   useEffect(() => {
     const apply = (next: string) => {
       scriptRef.current = next;
       setScript(next);
-      const run = runStrategyScript(bars, next);
-      setAppliedSource(next);
-      if (run.ok) {
-        const closed = run.trades.filter((trade) => trade.exitIndex !== null).length;
-        const trades = run.trades.length === 1 ? "1 trade" : `${run.trades.length} trades`;
-        setStatus(
-          `Full period applied. ${trades}, ${closed} closed. Entries and exits are on the chart.`,
-        );
-      } else {
-        setStatus(run.error);
-      }
-      onRunRef.current(run);
+      publish(next);
     };
 
     const api: StrategyApi = {
@@ -131,6 +122,7 @@ export function StrategyEditor({
       window.removeEventListener("mnq-set-script", onCustom);
       delete window.mnqStrategy;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bars]);
 
   useEffect(() => {
@@ -167,14 +159,14 @@ export function StrategyEditor({
     >
       <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 className="font-mono text-sm font-medium">Strategy script</h2>
+          <h2 className="font-mono text-sm font-medium">Strategy script (Long slot)</h2>
           <p className="max-w-3xl text-xs text-muted-foreground">
-            Pine-style bar script. Edits stay in localStorage under {STRATEGY_STORAGE_KEY}.
-            A bot can change the open page with mnqStrategy.setScript(code) and it reruns
-            without a redeploy.
+            Pine-style bar script for the Long runner. The Short runner uses the built-in
+            inverse sample unless you load it here. Edits stay in localStorage under{" "}
+            {STRATEGY_STORAGE_KEY}.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button type="button" size="sm" onClick={() => publish(scriptRef.current)}>
             Apply strategy
           </Button>
@@ -188,7 +180,19 @@ export function StrategyEditor({
               publish(DEFAULT_STRATEGY_SCRIPT);
             }}
           >
-            Reset
+            Load long sample
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              scriptRef.current = DEFAULT_SHORT_STRATEGY_SCRIPT;
+              setScript(DEFAULT_SHORT_STRATEGY_SCRIPT);
+              publish(DEFAULT_SHORT_STRATEGY_SCRIPT);
+            }}
+          >
+            Load short sample
           </Button>
         </div>
       </div>

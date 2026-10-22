@@ -73,7 +73,36 @@ if (!position && sessionOk && bar.c > bar.o && body / span >= 0.55 && body >= 4 
 return null
 `;
 
+
+export const DEFAULT_SHORT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
+// Inverse of the default long impulse-pullback: short a bearish impulse.
+// bar: { ts, o, h, l, c, v }
+// ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
+// position: null, or { side, entry, stop, target, risk } while a trade is open
+// Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
+// Entry fills at the signal close. One position at a time.
+// Impulse entries still target 2R. A close above the 5 EMA tightens that to 1R.
+// New shorts are skipped from 22:00 through 08:59 Chicago time.
+
+const ema5 = ta.ema(i, 5, "c")
+if (position && position.side === "short" && bar.c > ema5) {
+  return { target: position.entry - position.risk }
+}
+
+const ct = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", hour: "2-digit", hourCycle: "h23" }).format(new Date(bar.ts)))
+const sessionOk = ct >= 9 && ct <= 21
+const avgVol = ta.sma(i, 20, "v")
+const body = Math.abs(bar.c - bar.o)
+const span = Math.max(bar.h - bar.l, 0.25)
+if (!position && sessionOk && bar.c < bar.o && body / span >= 0.55 && body >= 4 && bar.v > avgVol * 1.8) {
+  const risk = Math.max(bar.h - bar.c, 1)
+  return { signal: true, side: "short", stop: bar.h, target: bar.c - risk * 2 }
+}
+return null
+`;
+
 export type ScriptMarker = {
+  strategyId: string;
   barIndex: number;
   visibleFromIndex: number;
   kind: "signal" | "entry" | "exit";
@@ -83,6 +112,7 @@ export type ScriptMarker = {
 };
 
 export type ScriptTrade = {
+  strategyId: string;
   side: "long" | "short";
   signalIndex: number;
   entryIndex: number;
@@ -203,7 +233,7 @@ function compile(source: string): BarFn {
   return created;
 }
 
-export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
+export function runStrategyScript(bars: OhlcvBar[], source: string, strategyId = "script"): ScriptRun {
   let fn: BarFn;
   try {
     fn = compile(source);
@@ -275,6 +305,7 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
         open.exitReason = exit.reason;
         open.exitPrice = exit.price;
         markers.push({
+          strategyId,
           barIndex: i,
           visibleFromIndex: i,
           kind: "exit",
@@ -300,6 +331,7 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
     const entry = bar.c;
     const risk = Math.max(Math.abs(entry - signal.stop), 0.25);
     markers.push({
+      strategyId,
       barIndex: i,
       visibleFromIndex: i,
       kind: "signal",
@@ -308,6 +340,7 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
       side: signal.side,
     });
     markers.push({
+      strategyId,
       barIndex: i,
       visibleFromIndex: i,
       kind: "entry",
@@ -316,6 +349,7 @@ export function runStrategyScript(bars: OhlcvBar[], source: string): ScriptRun {
       side: signal.side,
     });
     open = {
+      strategyId,
       side: signal.side,
       signalIndex: i,
       entryIndex: i,
@@ -487,5 +521,94 @@ export function scoreScript(
     openTrades,
     wins,
     losses,
+  };
+}
+
+export type NamedScriptRun = {
+  id: string;
+  name: string;
+  color: string;
+  run: ScriptRun;
+};
+
+export type EquitySeries = {
+  id: string;
+  name: string;
+  color: string;
+  equity: EquityPoint[];
+  endingEquity: number;
+};
+
+export type MultiBacktestReport = {
+  series: EquitySeries[];
+  /** Primary stats: combined when multiple series, else the single series. */
+  stats: BacktestStats;
+  perStrategy: { id: string; name: string; color: string; stats: BacktestStats }[];
+};
+
+export const STRATEGY_COLORS = {
+  long: "#3dd68c",
+  short: "#7aa2ff",
+  combined: "#f0c14a",
+} as const;
+
+export function mergeScriptRuns(named: NamedScriptRun[]): ScriptRun {
+  const okRuns = named.filter((item) => item.run.ok);
+  if (okRuns.length === 0) {
+    const first = named[0]?.run;
+    return first ?? { ok: false, error: "No strategies enabled.", markers: [], trades: [] };
+  }
+  const failed = named.find((item) => !item.run.ok);
+  if (failed && !failed.run.ok) {
+    return {
+      ok: false,
+      error: `${failed.name}: ${failed.run.error}`,
+      markers: [],
+      trades: [],
+    };
+  }
+  const markers = okRuns.flatMap((item) => item.run.markers);
+  const trades = okRuns.flatMap((item) => item.run.trades);
+  return { ok: true, markers, trades };
+}
+
+export function summarizeMultiBacktest(
+  named: NamedScriptRun[],
+  bars: OhlcvBar[],
+): MultiBacktestReport | null {
+  const okNamed = named.filter((item) => item.run.ok);
+  if (okNamed.length === 0 || bars.length === 0) return null;
+
+  const perStrategy = okNamed.map((item) => ({
+    id: item.id,
+    name: item.name,
+    color: item.color,
+    stats: summarizeBacktest(item.run, bars),
+  }));
+
+  const series: EquitySeries[] = perStrategy.map((item) => ({
+    id: item.id,
+    name: item.name,
+    color: item.color,
+    equity: item.stats.equity,
+    endingEquity: item.stats.endingEquity,
+  }));
+
+  const merged = mergeScriptRuns(okNamed);
+  const combinedStats = summarizeBacktest(merged, bars);
+  if (okNamed.length > 1) {
+    series.push({
+      id: "combined",
+      name: "Combined",
+      color: STRATEGY_COLORS.combined,
+      equity: combinedStats.equity,
+      endingEquity: combinedStats.endingEquity,
+    });
+  }
+
+  return {
+    series,
+    stats: combinedStats,
+    perStrategy,
   };
 }
