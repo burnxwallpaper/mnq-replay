@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { FixtureBar } from "@/lib/fixture-bars";
 import {
-  DEFAULT_SHORT_STRATEGY_SCRIPT,
   DEFAULT_STRATEGY_SCRIPT,
   STRATEGY_STORAGE_KEY,
   isStaleDefaultScript,
@@ -77,7 +76,7 @@ export function StrategyEditor({
       const closed = run.trades.filter((trade) => trade.exitIndex !== null).length;
       const trades = run.trades.length === 1 ? "1 trade" : `${run.trades.length} trades`;
       setStatus(
-        `Long slot applied. ${trades}, ${closed} closed. Enabled runners refresh the chart.`,
+        `Long strategy applied. ${trades}, ${closed} closed. Chart uses the strategies checked above.`,
       );
     } else {
       setStatus(run.error);
@@ -159,16 +158,16 @@ export function StrategyEditor({
     >
       <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 className="font-mono text-sm font-medium">Strategy script (Long slot)</h2>
+          <h2 className="font-mono text-sm font-medium">Long strategy script</h2>
           <p className="max-w-3xl text-xs text-muted-foreground">
-            Pine-style bar script for the Long runner. The Short runner uses the built-in
-            inverse sample unless you load it here. Edits stay in localStorage under{" "}
-            {STRATEGY_STORAGE_KEY}.
+            Edits only the Long strategy (long trades). Short strategy is separate — toggle
+            it above; it always uses the built-in short sample. Apply updates the Long
+            runner. Edits stay in localStorage under {STRATEGY_STORAGE_KEY}.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button type="button" size="sm" onClick={() => publish(scriptRef.current)}>
-            Apply strategy
+            Apply long strategy
           </Button>
           <Button
             type="button"
@@ -180,19 +179,7 @@ export function StrategyEditor({
               publish(DEFAULT_STRATEGY_SCRIPT);
             }}
           >
-            Load long sample
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              scriptRef.current = DEFAULT_SHORT_STRATEGY_SCRIPT;
-              setScript(DEFAULT_SHORT_STRATEGY_SCRIPT);
-              publish(DEFAULT_SHORT_STRATEGY_SCRIPT);
-            }}
-          >
-            Load short sample
+            Reset long sample
           </Button>
         </div>
       </div>
@@ -206,7 +193,7 @@ export function StrategyEditor({
         </pre>
         <textarea
           id="strategy-script"
-          aria-label="Strategy script"
+          aria-label="Long strategy script"
           spellCheck={false}
           value={script}
           onChange={(event) => setScript(event.target.value)}
@@ -224,7 +211,7 @@ export function StrategyEditor({
         className="mt-2 font-mono text-xs text-muted-foreground"
       >
         {appliedSource !== null && script !== appliedSource
-          ? "Draft changed. Apply strategy to refresh the full-period backtest."
+          ? "Draft changed. Apply long strategy to refresh the backtest."
           : status}
       </p>
     </section>

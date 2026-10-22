@@ -165,7 +165,7 @@ export function ReplayWorkspace() {
       if (run) {
         list.push({
           id: "long",
-          name: "Long",
+          name: "Long strategy",
           color: STRATEGY_COLORS.long,
           run,
         });
@@ -174,7 +174,7 @@ export function ReplayWorkspace() {
     if (shortEnabled) {
       list.push({
         id: "short",
-        name: "Short",
+        name: "Short strategy",
         color: STRATEGY_COLORS.short,
         run: runStrategyScript(bars, DEFAULT_SHORT_STRATEGY_SCRIPT, "short"),
       });
@@ -274,41 +274,44 @@ export function ReplayWorkspace() {
 
       <div
         id="strategy-runners"
-        className="flex flex-wrap items-center gap-3 rounded-lg bg-foreground/5 px-3 py-2 font-mono text-sm"
+        className="flex flex-col gap-1.5 rounded-lg bg-foreground/5 px-3 py-2 font-mono text-sm"
       >
-        <span className="text-xs tracking-wide text-muted-foreground uppercase">
-          Runners
-        </span>
-        <label className="inline-flex cursor-pointer items-center gap-2">
-          <input
-            id="runner-long"
-            type="checkbox"
-            checked={longEnabled}
-            onChange={(event) => {
-              const next = event.target.checked;
-              if (!next && !shortEnabled) return;
-              setLongEnabled(next);
-              setFitRevision((current) => current + 1);
-            }}
-          />
-          <span style={{ color: STRATEGY_COLORS.long }}>Long</span>
-          <span className="text-xs text-muted-foreground">(editor)</span>
-        </label>
-        <label className="inline-flex cursor-pointer items-center gap-2">
-          <input
-            id="runner-short"
-            type="checkbox"
-            checked={shortEnabled}
-            onChange={(event) => {
-              const next = event.target.checked;
-              if (!next && !longEnabled) return;
-              setShortEnabled(next);
-              setFitRevision((current) => current + 1);
-            }}
-          />
-          <span style={{ color: STRATEGY_COLORS.short }}>Short</span>
-          <span className="text-xs text-muted-foreground">(built-in inverse)</span>
-        </label>
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-xs tracking-wide text-muted-foreground uppercase">
+            Strategies
+          </span>
+          <label className="inline-flex cursor-pointer items-center gap-2">
+            <input
+              id="runner-long"
+              type="checkbox"
+              checked={longEnabled}
+              onChange={(event) => {
+                const next = event.target.checked;
+                if (!next && !shortEnabled) return;
+                setLongEnabled(next);
+                setFitRevision((current) => current + 1);
+              }}
+            />
+            <span style={{ color: STRATEGY_COLORS.long }}>Long strategy</span>
+          </label>
+          <label className="inline-flex cursor-pointer items-center gap-2">
+            <input
+              id="runner-short"
+              type="checkbox"
+              checked={shortEnabled}
+              onChange={(event) => {
+                const next = event.target.checked;
+                if (!next && !longEnabled) return;
+                setShortEnabled(next);
+                setFitRevision((current) => current + 1);
+              }}
+            />
+            <span style={{ color: STRATEGY_COLORS.short }}>Short strategy</span>
+          </label>
+        </div>
+        <p id="strategy-runners-help" className="text-xs text-muted-foreground">
+          Long = long only · Short = short only · check both to compare · 長倉／短倉／兩邊一齊跑
+        </p>
       </div>
 
       <p id="backtest-summary" className="font-mono text-sm">
@@ -316,7 +319,7 @@ export function ReplayWorkspace() {
           ? `Full period · ${tradeLabel} · ${formatR(score.totalR)} · ${formatPnl(score.totalPnl)} · ${score.wins} wins · ${score.losses} losses · ${entryLabel} · ${exitLabel}`
           : runnerError && !runnerError.run.ok
             ? `${runnerError.name}: ${runnerError.run.error}`
-            : "Full period backtest appears after Apply strategy."}
+            : "Full period backtest appears when a strategy is checked (Apply updates Long)."}
       </p>
 
       <p className="sr-only" role="status">
@@ -454,10 +457,10 @@ export function ReplayWorkspace() {
       />
 
       <p className="text-xs text-muted-foreground">
-        Toggle Long and/or Short above the chart. Long uses the editor script;
-        Short uses the built-in inverse impulse sample. Both can run on the same
-        bars with separate books. Equity shows one line per runner plus Combined
-        when both are on. Replay only moves the cursor.
+        Check Long strategy and/or Short strategy above the chart — that is the
+        only run control. The editor below edits Long only; Short always uses the
+        built-in inverse. Equity shows one line per strategy plus Combined when
+        both are on. Replay only moves the cursor.
       </p>
     </main>
   );
