@@ -84,6 +84,15 @@ export function CandleChart({
   const [scale, setScale] = useState("—");
   const [callouts, setCallouts] = useState<TradeCallout[]>([]);
   const [copyNote, setCopyNote] = useState("");
+  const [hoverLegend, setHoverLegend] = useState<{
+    time: string;
+    o: string;
+    h: string;
+    l: string;
+    c: string;
+    v: string;
+    up: boolean;
+  } | null>(null);
   const markersRef = useRef(markers);
   const barsRef = useRef(bars);
   const calloutSigRef = useRef("");
@@ -273,7 +282,30 @@ export function CandleChart({
       );
     };
 
+    const onCrosshairMove = (param: MouseEventParams) => {
+      if (!param.point || param.logical == null || param.time == null) {
+        setHoverLegend(null);
+        return;
+      }
+      const index = Math.round(Number(param.logical));
+      const bar = barsRef.current[index];
+      if (!bar) {
+        setHoverLegend(null);
+        return;
+      }
+      setHoverLegend({
+        time: formatFixtureTime(bar.ts),
+        o: formatFixturePrice(bar.o),
+        h: formatFixturePrice(bar.h),
+        l: formatFixturePrice(bar.l),
+        c: formatFixturePrice(bar.c),
+        v: bar.v.toLocaleString("en-US"),
+        up: bar.c >= bar.o,
+      });
+    };
+
     chart.subscribeClick(onChartClick);
+    chart.subscribeCrosshairMove(onCrosshairMove);
     chart.timeScale().subscribeVisibleLogicalRangeChange(readScales);
     frame.addEventListener("pointermove", readScales);
     frame.addEventListener("pointerup", readScales);
@@ -282,6 +314,7 @@ export function CandleChart({
     return () => {
       window.clearTimeout(copyTimer.id);
       chart.unsubscribeClick(onChartClick);
+      chart.unsubscribeCrosshairMove(onCrosshairMove);
       frame.removeEventListener("pointermove", readScales);
       frame.removeEventListener("pointerup", readScales);
       frame.removeEventListener("wheel", readScales);
@@ -421,6 +454,26 @@ export function CandleChart({
           </div>
         ))}
       </div>
+      {hoverLegend ? (
+        <div
+          id="chart-hover-legend"
+          className="pointer-events-none absolute top-2 left-2 z-10 max-w-[min(100%,28rem)] rounded-sm bg-[rgba(18,21,28,0.88)] px-2 py-1 font-mono text-[11px] leading-4 text-[#d5deea] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]"
+        >
+          <div className="text-[#9aa8b8]">{hoverLegend.time}</div>
+          <div>
+            <span className="text-[#9aa8b8]">O </span>
+            {hoverLegend.o}
+            <span className="text-[#9aa8b8]">{"  "}H </span>
+            {hoverLegend.h}
+            <span className="text-[#9aa8b8]">{"  "}L </span>
+            {hoverLegend.l}
+            <span className="text-[#9aa8b8]">{"  "}C </span>
+            <span style={{ color: hoverLegend.up ? UP : DOWN }}>{hoverLegend.c}</span>
+            <span className="text-[#9aa8b8]">{"  "}V </span>
+            {hoverLegend.v}
+          </div>
+        </div>
+      ) : null}
       <div className="pointer-events-none absolute top-8 right-24 z-10 text-right font-mono text-[11px] text-[#d5deea]">
         <div id="chart-time">{span}</div>
         <div id="chart-price">Price {scale}</div>
