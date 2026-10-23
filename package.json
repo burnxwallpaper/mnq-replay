@@ -9,7 +9,10 @@
     "preview": "npx --yes serve out -l 43124",
     "lint": "eslint",
     "test": "node --experimental-sqlite --import tsx --test --test-concurrency=1 lib/strategies/engine.test.ts",
-    "db:init": "node --experimental-sqlite scripts/init-db.mjs"
+    "db:init": "node --experimental-sqlite scripts/init-db.mjs",
+    "paper:local": "npx tsx paper/local-runner.ts",
+    "paper:forward": "npx tsx paper/forward-step.ts",
+    "paper:ib-stub": "npx tsx paper/ib-paper-runner.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

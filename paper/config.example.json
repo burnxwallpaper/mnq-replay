@@ -1,0 +1,21 @@
+{
+  "mode": "local",
+  "ibHost": "127.0.0.1",
+  "ibPort": 7497,
+  "clientId": 7,
+  "allowLive": false,
+  "symbol": "MNQ",
+  "exchange": "GLOBEX",
+  "currency": "USD",
+  "filters": {
+    "bodyRatio": 0.45,
+    "minBody": 2,
+    "volLen": 15,
+    "volMult": 1.2
+  },
+  "roundTripFeeUsd": 1.6,
+  "pointValue": 2,
+  "startingEquity": 10000,
+  "maxContracts": 1,
+  "side": "both"
+}
