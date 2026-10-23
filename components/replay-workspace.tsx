@@ -388,11 +388,6 @@ export function ReplayWorkspace() {
           setFiltersEpoch((n) => n + 1);
           setFitRevision((current) => current + 1);
         }}
-        onReset={() => {
-          setEntryFilters(DEFAULT_ENTRY_FILTERS);
-          setFiltersEpoch((n) => n + 1);
-          setFitRevision((current) => current + 1);
-        }}
       />
 
       <p id="backtest-summary" className="font-mono text-sm">

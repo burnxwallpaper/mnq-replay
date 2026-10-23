@@ -5,21 +5,21 @@ export const STRATEGY_STORAGE_KEY = "mnq-replay.strategyScript";
 export const ENTRY_FILTERS_STORAGE_KEY = "mnq-replay.entryFilters";
 
 export type EntryFilters = {
-  /** Min body / range ratio, e.g. 0.55 */
+  /** Min body / range ratio, e.g. 0.45 */
   bodyRatio: number;
-  /** Min absolute body in index points, e.g. 4 */
+  /** Min absolute body in index points, e.g. 2 */
   minBody: number;
-  /** Volume SMA length, e.g. 20 */
+  /** Volume SMA length, e.g. 15 */
   volLen: number;
-  /** Volume must exceed SMA × this, e.g. 1.8 */
+  /** Volume must exceed SMA × this, e.g. 1.2 */
   volMult: number;
 };
 
 export const DEFAULT_ENTRY_FILTERS: EntryFilters = {
-  bodyRatio: 0.55,
-  minBody: 4,
-  volLen: 20,
-  volMult: 1.8,
+  bodyRatio: 0.45,
+  minBody: 2,
+  volLen: 15,
+  volMult: 1.2,
 };
 
 function clampFilters(raw: Partial<EntryFilters> | null | undefined): EntryFilters {

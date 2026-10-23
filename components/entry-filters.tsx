@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
+
 import type { EntryFilters } from "@/lib/strategy-script";
-import { DEFAULT_ENTRY_FILTERS } from "@/lib/strategy-script";
+import { DEFAULT_ENTRY_FILTERS, normalizeEntryFilters } from "@/lib/strategy-script";
 
 type Field = {
   key: keyof EntryFilters;
@@ -16,7 +18,7 @@ const FIELDS: Field[] = [
   {
     key: "bodyRatio",
     label: "Body / range",
-    help: "實體佔波幅比例（原 0.55）",
+    help: "實體佔波幅比例",
     step: 0.05,
     min: 0.05,
     max: 1,
@@ -24,7 +26,7 @@ const FIELDS: Field[] = [
   {
     key: "minBody",
     label: "Min body pts",
-    help: "最少實體點數（原 4）",
+    help: "最少實體點數",
     step: 0.25,
     min: 0.25,
     max: 200,
@@ -32,7 +34,7 @@ const FIELDS: Field[] = [
   {
     key: "volLen",
     label: "Vol SMA",
-    help: "成交量均線長度（原 20）",
+    help: "成交量均線長度",
     step: 1,
     min: 2,
     max: 200,
@@ -40,22 +42,37 @@ const FIELDS: Field[] = [
   {
     key: "volMult",
     label: "Vol ×",
-    help: "放量倍數（原 1.8）",
+    help: "放量倍數",
     step: 0.1,
     min: 0.1,
     max: 20,
   },
 ];
 
+function filtersEqual(a: EntryFilters, b: EntryFilters) {
+  return (
+    a.bodyRatio === b.bodyRatio &&
+    a.minBody === b.minBody &&
+    a.volLen === b.volLen &&
+    a.volMult === b.volMult
+  );
+}
+
 export function EntryFiltersPanel({
   value,
   onChange,
-  onReset,
 }: {
   value: EntryFilters;
   onChange: (next: EntryFilters) => void;
-  onReset: () => void;
 }) {
+  const [draft, setDraft] = useState<EntryFilters>(value);
+
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  const dirty = useMemo(() => !filtersEqual(draft, value), [draft, value]);
+
   return (
     <section
       id="entry-filters"
@@ -68,18 +85,32 @@ export function EntryFiltersPanel({
             Entry filters
           </h2>
           <p className="text-xs text-muted-foreground">
-            改完即套用到 Long／Short 預設腳本（session + 5 EMA 不變）· body ≥ ratio · body pts ·
-            vol &gt; SMA × mult
+            改數字後撳 Save 先套用到 Long／Short 預設腳本（session + 5 EMA 不變）· body ≥ ratio ·
+            body pts · vol &gt; SMA × mult
+            {dirty ? (
+              <span className="ml-1 text-amber-300/90">· unsaved</span>
+            ) : null}
           </p>
         </div>
-        <button
-          type="button"
-          className="font-mono text-xs text-muted-foreground underline-offset-2 hover:underline"
-          onClick={onReset}
-        >
-          Reset {DEFAULT_ENTRY_FILTERS.bodyRatio} / {DEFAULT_ENTRY_FILTERS.minBody} /{" "}
-          {DEFAULT_ENTRY_FILTERS.volLen}×{DEFAULT_ENTRY_FILTERS.volMult}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className="font-mono text-xs text-muted-foreground underline-offset-2 hover:underline"
+            onClick={() => setDraft(DEFAULT_ENTRY_FILTERS)}
+          >
+            Reset {DEFAULT_ENTRY_FILTERS.bodyRatio} / {DEFAULT_ENTRY_FILTERS.minBody} /{" "}
+            {DEFAULT_ENTRY_FILTERS.volLen}×{DEFAULT_ENTRY_FILTERS.volMult}
+          </button>
+          <button
+            type="button"
+            id="entry-filters-save"
+            disabled={!dirty}
+            className="rounded-md bg-foreground px-2.5 py-1 font-mono text-xs text-background disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={() => onChange(normalizeEntryFilters(draft))}
+          >
+            Save
+          </button>
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {FIELDS.map((field) => (
@@ -98,11 +129,11 @@ export function EntryFiltersPanel({
               step={field.step}
               min={field.min}
               max={field.max}
-              value={value[field.key]}
+              value={draft[field.key]}
               onChange={(event) => {
                 const raw = event.target.valueAsNumber;
                 if (!Number.isFinite(raw)) return;
-                onChange({ ...value, [field.key]: raw });
+                setDraft((current) => ({ ...current, [field.key]: raw }));
               }}
               className="w-full bg-transparent font-mono text-sm outline-none"
             />
