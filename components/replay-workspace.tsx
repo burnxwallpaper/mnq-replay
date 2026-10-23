@@ -30,9 +30,9 @@ const PLAY_MS = 180;
 const INITIAL_VISIBLE = 180;
 const RUNNERS_STORAGE_KEY = "mnq-replay.enabledRunners";
 
-function formatR(value: number) {
+function formatPoints(value: number) {
   const sign = value > 0 ? "+" : "";
-  return `${sign}${value.toFixed(2)} R`;
+  return `${sign}${value.toFixed(2)} pts`;
 }
 
 function formatPnl(value: number) {
@@ -316,7 +316,7 @@ export function ReplayWorkspace() {
 
       <p id="backtest-summary" className="font-mono text-sm">
         {score
-          ? `Full period · ${tradeLabel} · ${formatR(score.totalR)} · ${formatPnl(score.totalPnl)} · ${score.wins} wins · ${score.losses} losses · ${entryLabel} · ${exitLabel}`
+          ? `Full period · ${tradeLabel} · ${formatPoints(score.totalPoints)} · ${formatPnl(score.totalPnl)} · ${score.wins} wins · ${score.losses} losses · ${entryLabel} · ${exitLabel}`
           : runnerError && !runnerError.run.ok
             ? `${runnerError.name}: ${runnerError.run.error}`
             : "Full period backtest appears when a strategy is checked (Apply updates Long)."}
@@ -392,8 +392,8 @@ export function ReplayWorkspace() {
                     <dd>{tradeCount}</dd>
                   </div>
                   <div className="flex justify-between gap-3">
-                    <dt className="text-muted-foreground">Total R</dt>
-                    <dd>{formatR(score.totalR)}</dd>
+                    <dt className="text-muted-foreground">Total pts</dt>
+                    <dd>{formatPoints(score.totalPoints)}</dd>
                   </div>
                   <div className="flex justify-between gap-3">
                     <dt className="text-muted-foreground">Total PnL</dt>
@@ -402,13 +402,13 @@ export function ReplayWorkspace() {
                   <div className="flex justify-between gap-3">
                     <dt className="text-muted-foreground">Realized</dt>
                     <dd>
-                      {formatR(score.realizedR)} · {score.closedTrades}
+                      {formatPoints(score.realizedPoints)} · {score.closedTrades}
                     </dd>
                   </div>
                   <div className="flex justify-between gap-3">
                     <dt className="text-muted-foreground">Open</dt>
                     <dd>
-                      {formatR(score.openR)} · {score.openTrades}
+                      {formatPoints(score.openPoints)} · {score.openTrades}
                     </dd>
                   </div>
                   <div className="flex justify-between gap-3">

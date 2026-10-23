@@ -126,10 +126,11 @@ export type ScriptTrade = {
 };
 
 export type ScriptScore = {
-  totalR: number;
+  /** Net index points (price move), not R-multiples. */
+  totalPoints: number;
   totalPnl: number;
-  realizedR: number;
-  openR: number;
+  realizedPoints: number;
+  openPoints: number;
   closedTrades: number;
   openTrades: number;
   wins: number;
@@ -369,7 +370,7 @@ export function runStrategyScript(bars: OhlcvBar[], source: string, strategyId =
 
 export const MNQ_POINT_VALUE = 2;
 
-/** Starting net asset for equity curves ($2/R PnL is added on top). */
+/** Starting net asset for equity curves ($2 per MNQ point is added on top). */
 export const STARTING_NET_ASSET = 10_000;
 
 export type EquityPoint = {
@@ -409,8 +410,8 @@ function isClosed(
 
 function tradePnl(trade: ScriptTrade, exitPrice: number) {
   const sign = trade.side === "short" ? -1 : 1;
-  const risk = trade.riskPoints === 0 ? 0.25 : trade.riskPoints;
-  return (((exitPrice - trade.entryPrice) * sign) / risk) * MNQ_POINT_VALUE;
+  const points = (exitPrice - trade.entryPrice) * sign;
+  return points * MNQ_POINT_VALUE;
 }
 
 export function summarizeBacktest(
@@ -501,8 +502,8 @@ export function scoreScript(
   bars: OhlcvBar[],
   cursor: number,
 ): ScriptScore {
-  let realizedR = 0;
-  let openR = 0;
+  let realizedPoints = 0;
+  let openPoints = 0;
   let closedTrades = 0;
   let openTrades = 0;
   let wins = 0;
@@ -512,24 +513,24 @@ export function scoreScript(
   for (const trade of trades) {
     if (trade.entryIndex > cursor) continue;
     const sign = trade.side === "short" ? -1 : 1;
-    const marked = (price: number) => ((price - trade.entryPrice) * sign) / trade.riskPoints;
+    const marked = (price: number) => (price - trade.entryPrice) * sign;
     if (trade.exitIndex !== null && trade.exitPrice !== null && trade.exitIndex <= cursor) {
-      realizedR += marked(trade.exitPrice);
+      realizedPoints += marked(trade.exitPrice);
       closedTrades += 1;
       if (trade.exitReason === "target") wins += 1;
       if (trade.exitReason === "stop") losses += 1;
     } else {
-      openR += marked(bars[cursor].c);
+      openPoints += marked(bars[cursor].c);
       openTrades += 1;
     }
   }
 
-  const totalR = realizedR + openR;
+  const totalPoints = realizedPoints + openPoints;
   return {
-    totalR,
-    totalPnl: totalR * pointValue,
-    realizedR,
-    openR,
+    totalPoints,
+    totalPnl: totalPoints * pointValue,
+    realizedPoints,
+    openPoints,
     closedTrades,
     openTrades,
     wins,

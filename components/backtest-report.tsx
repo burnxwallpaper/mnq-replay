@@ -292,7 +292,7 @@ export function BacktestReport({ report }: { report: MultiBacktestReport | null 
           {formatAsset(stats.endingEquity)}
           <span className="text-muted-foreground">
             {" "}
-            · start {formatAsset(STARTING_NET_ASSET)} · $2/R · full period
+            · start {formatAsset(STARTING_NET_ASSET)} · $2/pt · full period
           </span>
         </p>
       </div>
