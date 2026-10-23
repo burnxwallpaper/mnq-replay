@@ -15,13 +15,19 @@ import {
   loadMnqBars,
   type FixtureBar,
 } from "@/lib/fixture-bars";
+import { EntryFiltersPanel } from "@/components/entry-filters";
 import {
-  DEFAULT_SHORT_STRATEGY_SCRIPT,
+  DEFAULT_ENTRY_FILTERS,
+  ENTRY_FILTERS_STORAGE_KEY,
   STRATEGY_COLORS,
+  buildLongStrategyScript,
+  buildShortStrategyScript,
   mergeScriptRuns,
+  normalizeEntryFilters,
   runStrategyScript,
   scoreScript,
   summarizeMultiBacktest,
+  type EntryFilters,
   type NamedScriptRun,
   type ScriptRun,
 } from "@/lib/strategy-script";
@@ -64,6 +70,26 @@ function writeEnabledRunners(long: boolean, short: boolean) {
   }
 }
 
+function readEntryFilters(): EntryFilters {
+  try {
+    const raw = window.localStorage.getItem(ENTRY_FILTERS_STORAGE_KEY);
+    if (!raw) return DEFAULT_ENTRY_FILTERS;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return DEFAULT_ENTRY_FILTERS;
+    return normalizeEntryFilters(parsed as Partial<EntryFilters>);
+  } catch {
+    return DEFAULT_ENTRY_FILTERS;
+  }
+}
+
+function writeEntryFilters(filters: EntryFilters) {
+  try {
+    window.localStorage.setItem(ENTRY_FILTERS_STORAGE_KEY, JSON.stringify(filters));
+  } catch {
+    // Ignore private-mode storage failures.
+  }
+}
+
 export function ReplayWorkspace() {
   const [bars, setBars] = useState<FixtureBar[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -74,6 +100,9 @@ export function ReplayWorkspace() {
   const [longEnabled, setLongEnabled] = useState(true);
   const [shortEnabled, setShortEnabled] = useState(false);
   const [fitRevision, setFitRevision] = useState(0);
+  const [entryFilters, setEntryFilters] = useState<EntryFilters>(DEFAULT_ENTRY_FILTERS);
+  const [filtersEpoch, setFiltersEpoch] = useState(0);
+  const filtersHydratedRef = useRef(false);
   const lastIndex = bars ? bars.length - 1 : 0;
   const toggleRef = useRef<() => void>(() => {});
 
@@ -81,11 +110,18 @@ export function ReplayWorkspace() {
     const saved = readEnabledRunners();
     setLongEnabled(saved.long);
     setShortEnabled(saved.short);
+    setEntryFilters(readEntryFilters());
+    filtersHydratedRef.current = true;
   }, []);
 
   useEffect(() => {
     writeEnabledRunners(longEnabled, shortEnabled);
   }, [longEnabled, shortEnabled]);
+
+  useEffect(() => {
+    if (!filtersHydratedRef.current) return;
+    writeEntryFilters(entryFilters);
+  }, [entryFilters]);
 
   useEffect(() => {
     let cancelled = false;
@@ -176,11 +212,11 @@ export function ReplayWorkspace() {
         id: "short",
         name: "Short strategy",
         color: STRATEGY_COLORS.short,
-        run: runStrategyScript(bars, DEFAULT_SHORT_STRATEGY_SCRIPT, "short"),
+        run: runStrategyScript(bars, buildShortStrategyScript(entryFilters), "short"),
       });
     }
     return list;
-  }, [bars, longEnabled, shortEnabled, longRun, longSource]);
+  }, [bars, longEnabled, shortEnabled, longRun, longSource, entryFilters]);
 
   const mergedRun = useMemo(() => {
     if (namedRuns.length === 0) return null;
@@ -313,6 +349,20 @@ export function ReplayWorkspace() {
           Long = long only · Short = short only · check both to compare · 長倉／短倉／兩邊一齊跑
         </p>
       </div>
+
+      <EntryFiltersPanel
+        value={entryFilters}
+        onChange={(next) => {
+          setEntryFilters(normalizeEntryFilters(next));
+          setFiltersEpoch((n) => n + 1);
+          setFitRevision((current) => current + 1);
+        }}
+        onReset={() => {
+          setEntryFilters(DEFAULT_ENTRY_FILTERS);
+          setFiltersEpoch((n) => n + 1);
+          setFitRevision((current) => current + 1);
+        }}
+      />
 
       <p id="backtest-summary" className="font-mono text-sm">
         {score
@@ -449,6 +499,8 @@ export function ReplayWorkspace() {
 
       <StrategyEditor
         bars={bars}
+        defaultScript={() => buildLongStrategyScript(entryFilters)}
+        filtersKey={filtersEpoch > 0 ? `${filtersEpoch}:${JSON.stringify(entryFilters)}` : undefined}
         onApply={(source, run) => {
           setLongSource(source);
           setLongRun(run);

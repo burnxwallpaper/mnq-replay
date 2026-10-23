@@ -11,6 +11,8 @@ import {
   type ScriptRun,
 } from "@/lib/strategy-script";
 
+type DefaultScriptFn = () => string;
+
 type StrategyApi = {
   getScript: () => string;
   setScript: (script: string) => void;
@@ -54,12 +56,19 @@ function scriptFromHash(): string | null {
 export function StrategyEditor({
   bars,
   onApply,
+  defaultScript,
+  filtersKey,
 }: {
   bars: FixtureBar[];
   /** Fires with the editor source whenever Apply / auto-load runs the long slot. */
   onApply: (source: string, run: ScriptRun) => void;
+  /** Current default long script (from entry filters). */
+  defaultScript?: DefaultScriptFn;
+  /** When this string changes, re-apply the default long script from filters. */
+  filtersKey?: string;
 }) {
-  const [script, setScript] = useState(DEFAULT_STRATEGY_SCRIPT);
+  const resolveDefault = defaultScript ?? (() => DEFAULT_STRATEGY_SCRIPT);
+  const [script, setScript] = useState(() => resolveDefault());
   const [status, setStatus] = useState("Loading saved script…");
   const gutterRef = useRef<HTMLPreElement>(null);
   const onApplyRef = useRef(onApply);
@@ -94,7 +103,7 @@ export function StrategyEditor({
     const api: StrategyApi = {
       getScript: () => scriptRef.current,
       setScript: (next) => apply(next),
-      resetScript: () => apply(DEFAULT_STRATEGY_SCRIPT),
+      resetScript: () => apply(resolveDefault()),
       storageKey: STRATEGY_STORAGE_KEY,
     };
     window.mnqStrategy = api;
@@ -128,7 +137,7 @@ export function StrategyEditor({
     const hashed = scriptFromHash();
     const stored = readStoredScript();
     const saved = stored !== null && isStaleDefaultScript(stored) ? null : stored;
-    const next = hashed ?? saved ?? DEFAULT_STRATEGY_SCRIPT;
+    const next = hashed ?? saved ?? resolveDefault();
     if (hashed) {
       writeStoredScript(hashed);
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
@@ -147,6 +156,16 @@ export function StrategyEditor({
     }
     writeStoredScript(script);
   }, [script]);
+
+  // Entry-filter knobs regenerate the default long sample and apply it.
+  useEffect(() => {
+    if (filtersKey == null) return;
+    const next = resolveDefault();
+    scriptRef.current = next;
+    setScript(next);
+    publish(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtersKey]);
 
   const lineCount = Math.max(1, script.split("\n").length);
   const gutter = Array.from({ length: lineCount }, (_, line) => String(line + 1)).join("\n");
@@ -174,9 +193,10 @@ export function StrategyEditor({
             variant="outline"
             size="sm"
             onClick={() => {
-              scriptRef.current = DEFAULT_STRATEGY_SCRIPT;
-              setScript(DEFAULT_STRATEGY_SCRIPT);
-              publish(DEFAULT_STRATEGY_SCRIPT);
+              const next = resolveDefault();
+              scriptRef.current = next;
+              setScript(next);
+              publish(next);
             }}
           >
             Reset long sample

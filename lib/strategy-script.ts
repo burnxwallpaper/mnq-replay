@@ -2,6 +2,42 @@ import { ema } from "@/lib/ema";
 import type { OhlcvBar } from "@/lib/strategies/types";
 
 export const STRATEGY_STORAGE_KEY = "mnq-replay.strategyScript";
+export const ENTRY_FILTERS_STORAGE_KEY = "mnq-replay.entryFilters";
+
+export type EntryFilters = {
+  /** Min body / range ratio, e.g. 0.55 */
+  bodyRatio: number;
+  /** Min absolute body in index points, e.g. 4 */
+  minBody: number;
+  /** Volume SMA length, e.g. 20 */
+  volLen: number;
+  /** Volume must exceed SMA × this, e.g. 1.8 */
+  volMult: number;
+};
+
+export const DEFAULT_ENTRY_FILTERS: EntryFilters = {
+  bodyRatio: 0.55,
+  minBody: 4,
+  volLen: 20,
+  volMult: 1.8,
+};
+
+function clampFilters(raw: Partial<EntryFilters> | null | undefined): EntryFilters {
+  const base = DEFAULT_ENTRY_FILTERS;
+  const num = (value: unknown, fallback: number) => {
+    const n = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const bodyRatio = Math.min(1, Math.max(0.05, num(raw?.bodyRatio, base.bodyRatio)));
+  const minBody = Math.min(200, Math.max(0.25, num(raw?.minBody, base.minBody)));
+  const volLen = Math.min(200, Math.max(2, Math.round(num(raw?.volLen, base.volLen))));
+  const volMult = Math.min(20, Math.max(0.1, num(raw?.volMult, base.volMult)));
+  return { bodyRatio, minBody, volLen, volMult };
+}
+
+export function normalizeEntryFilters(raw: Partial<EntryFilters> | null | undefined): EntryFilters {
+  return clampFilters(raw);
+}
 
 /** Previous on-page defaults. A saved copy of either one upgrades to the current script. */
 export const LEGACY_DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
@@ -43,11 +79,9 @@ if (!position && bar.c > bar.o && body / span >= 0.55 && body >= 4 && bar.v > av
 return null
 `;
 
-export function isStaleDefaultScript(script: string) {
-  return script === LEGACY_DEFAULT_STRATEGY_SCRIPT || script === EMA_EXIT_DEFAULT_STRATEGY_SCRIPT;
-}
-
-export const DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
+export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FILTERS): string {
+  const f = clampFilters(filters);
+  return `// MNQ 1-minute strategy. This runs in the browser on each bar.
 // bar: { ts, o, h, l, c, v }
 // ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
 // position: null, or { side, entry, stop, target, risk } while a trade is open
@@ -55,6 +89,7 @@ export const DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in t
 // Entry fills at the signal close. One position at a time.
 // Impulse entries still target 2R. A close below the 5 EMA tightens that to 1R.
 // New longs are skipped from 22:00 through 08:59 Chicago time.
+// Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "long" && bar.c < ema5) {
@@ -63,19 +98,21 @@ if (position && position.side === "long" && bar.c < ema5) {
 
 const ct = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", hour: "2-digit", hourCycle: "h23" }).format(new Date(bar.ts)))
 const sessionOk = ct >= 9 && ct <= 21
-const avgVol = ta.sma(i, 20, "v")
+const avgVol = ta.sma(i, ${f.volLen}, "v")
 const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
-if (!position && sessionOk && bar.c > bar.o && body / span >= 0.55 && body >= 4 && bar.v > avgVol * 1.8) {
+if (!position && sessionOk && bar.c > bar.o && body / span >= ${f.bodyRatio} && body >= ${f.minBody} && bar.v > avgVol * ${f.volMult}) {
   const risk = Math.max(bar.c - bar.l, 1)
   return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * 2 }
 }
 return null
 `;
+}
 
-
-export const DEFAULT_SHORT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This runs in the browser on each bar.
-// Inverse of the default long impulse-pullback: short a bearish impulse.
+export function buildShortStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FILTERS): string {
+  const f = clampFilters(filters);
+  return `// MNQ 1-minute strategy. This runs in the browser on each bar.
+// Inverse of the default long impulse: short a bearish impulse.
 // bar: { ts, o, h, l, c, v }
 // ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
 // position: null, or { side, entry, stop, target, risk } while a trade is open
@@ -83,6 +120,7 @@ export const DEFAULT_SHORT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This run
 // Entry fills at the signal close. One position at a time.
 // Impulse entries still target 2R. A close above the 5 EMA tightens that to 1R.
 // New shorts are skipped from 22:00 through 08:59 Chicago time.
+// Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "short" && bar.c > ema5) {
@@ -91,15 +129,23 @@ if (position && position.side === "short" && bar.c > ema5) {
 
 const ct = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", hour: "2-digit", hourCycle: "h23" }).format(new Date(bar.ts)))
 const sessionOk = ct >= 9 && ct <= 21
-const avgVol = ta.sma(i, 20, "v")
+const avgVol = ta.sma(i, ${f.volLen}, "v")
 const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
-if (!position && sessionOk && bar.c < bar.o && body / span >= 0.55 && body >= 4 && bar.v > avgVol * 1.8) {
+if (!position && sessionOk && bar.c < bar.o && body / span >= ${f.bodyRatio} && body >= ${f.minBody} && bar.v > avgVol * ${f.volMult}) {
   const risk = Math.max(bar.h - bar.c, 1)
   return { signal: true, side: "short", stop: bar.h, target: bar.c - risk * 2 }
 }
 return null
 `;
+}
+
+export const DEFAULT_STRATEGY_SCRIPT = buildLongStrategyScript(DEFAULT_ENTRY_FILTERS);
+export const DEFAULT_SHORT_STRATEGY_SCRIPT = buildShortStrategyScript(DEFAULT_ENTRY_FILTERS);
+
+export function isStaleDefaultScript(script: string) {
+  return script === LEGACY_DEFAULT_STRATEGY_SCRIPT || script === EMA_EXIT_DEFAULT_STRATEGY_SCRIPT;
+}
 
 export type ScriptMarker = {
   strategyId: string;
