@@ -33,14 +33,26 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 LIVE_PORTS = {7496, 4001}
 PAPER_DIR = Path(__file__).resolve().parent
 STATE_PATH = PAPER_DIR / "state.json"
 TRADES_PATH = PAPER_DIR / "trades.jsonl"
-CHICAGO = ZoneInfo("America/Chicago")
 UTC = timezone.utc
+
+
+def _chicago_tz() -> ZoneInfo:
+    try:
+        return ZoneInfo("America/Chicago")
+    except ZoneInfoNotFoundError as exc:
+        raise SystemExit(
+            "Missing timezone data for America/Chicago. On Windows run: "
+            "py -3 -m pip install --user tzdata"
+        ) from exc
+
+
+CHICAGO = _chicago_tz()
 
 Side = Literal["long", "short"]
 Log = logging.getLogger("ib_paper_loop")
@@ -465,8 +477,6 @@ class PaperLoop:
         matches the backtest bar size and fires hasNewBar on each minute close.
         """
         assert self.ib and self.contract
-        # duration: enough for warmupBars (~400 minutes ≈ 1 D is usually enough;
-        # use 2 D for safety around weekends/halts)
         duration = "2 D"
         Log.info(
             "Requesting historical 1m warmup duration=%s whatToShow=TRADES useRTH=False keepUpToDate=True",
@@ -482,12 +492,51 @@ class PaperLoop:
             formatDate=1,
             keepUpToDate=True,
         )
-        self.ib.sleep(2)  # allow initial buffer
+        self.ib.sleep(3)
         self.bars = [ib_bar_to_bar(b) for b in self._hist_bars]
-        # Drop the last bar if it is still forming (keepUpToDate includes current)
-        if len(self.bars) >= 2:
-            # Keep all for now; process only completed via hasNewBar
-            pass
+
+        if not self.bars:
+            Log.warning(
+                "keepUpToDate returned 0 bars — retrying static historical (no stream) then re-subscribe"
+            )
+            try:
+                self.ib.cancelHistoricalData(self._hist_bars)
+            except Exception:  # noqa: BLE001
+                pass
+            self.ib.sleep(1)
+            static = self.ib.reqHistoricalData(
+                self.contract,
+                endDateTime="",
+                durationStr=duration,
+                barSizeSetting="1 min",
+                whatToShow="TRADES",
+                useRTH=False,
+                formatDate=1,
+                keepUpToDate=False,
+            )
+            self.ib.sleep(2)
+            self.bars = [ib_bar_to_bar(b) for b in static]
+            if self.bars:
+                # Re-subscribe keepUpToDate for live updates (may still fail on Error 162)
+                self._hist_bars = self.ib.reqHistoricalData(
+                    self.contract,
+                    endDateTime="",
+                    durationStr="1800 S",
+                    barSizeSetting="1 min",
+                    whatToShow="TRADES",
+                    useRTH=False,
+                    formatDate=1,
+                    keepUpToDate=True,
+                )
+                self.ib.sleep(2)
+                live = [ib_bar_to_bar(b) for b in self._hist_bars]
+                if live:
+                    # merge by ts
+                    by_ts = {b.ts: b for b in self.bars}
+                    for b in live:
+                        by_ts[b.ts] = b
+                    self.bars = [by_ts[k] for k in sorted(by_ts)]
+
         Log.info(
             "Warmup loaded %s bars; last ts=%s (%s CT hour=%s)",
             len(self.bars),
@@ -497,14 +546,18 @@ class PaperLoop:
             else "-",
             chicago_hour(self.bars[-1].ts) if self.bars else "-",
         )
-        if self.bars:
-            # Evaluate latest *completed* historical bar for immediate dry-run visibility
-            # (no orders on warmup snapshot)
-            completed_idx = max(0, len(self.bars) - 2) if len(self.bars) >= 2 else 0
-            self._heartbeat_eval(completed_idx, source="warmup-completed", allow_order=False)
-            self._last_processed_ts = self.bars[completed_idx].ts
-
-        self._hist_bars.updateEvent += self._on_bar_update
+        if not self.bars:
+            raise RuntimeError(
+                "No 1m historical bars from IB (Error 162 common cause: another TWS/Gateway "
+                "session on a different IP is using this username's market data). "
+                "Log out other TWS/Gateway/mobile trading sessions, wait ~1 minute, retry. "
+                "Weekend: equity-index futures are usually closed Fri–Sun evening CT."
+            )
+        completed_idx = max(0, len(self.bars) - 2) if len(self.bars) >= 2 else 0
+        self._heartbeat_eval(completed_idx, source="warmup-completed", allow_order=False)
+        self._last_processed_ts = self.bars[completed_idx].ts
+        if self._hist_bars is not None:
+            self._hist_bars.updateEvent += self._on_bar_update
 
     def _on_bar_update(self, bars: Any, has_new_bar: bool) -> None:
         if self._stopping:
@@ -659,7 +712,7 @@ class PaperLoop:
         self.state.open = None
 
     def _place_bracket(self, sig: Signal) -> None:
-        from ib_insync import LimitOrder, Order, StopOrder  # type: ignore
+        from ib_insync import LimitOrder, StopOrder  # type: ignore
 
         assert self.ib and self.contract
         qty = self.cfg.maxContracts
@@ -752,7 +805,17 @@ class PaperLoop:
         signal.signal(signal.SIGINT, _handle_sig)
         signal.signal(signal.SIGTERM, _handle_sig)
 
+        deadline = None
+        timeout_sec = getattr(self, "_timeout_sec", 0) or 0
+        if timeout_sec > 0:
+            deadline = time.time() + timeout_sec
+            Log.info("Auto-stop in %ss", timeout_sec)
+
         while not self._stopping:
+            if deadline is not None and time.time() >= deadline:
+                Log.info("Timeout reached — stopping")
+                self._stopping = True
+                break
             self.ib.sleep(1)
             # Periodic position sync
             if self.place_orders and self.state.open:
@@ -798,6 +861,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="If >0, exit after this many *stream* completed bars (0=forever)",
     )
+    p.add_argument(
+        "--timeout-sec",
+        type=int,
+        default=0,
+        help="If >0, exit after this many seconds (smoke tests)",
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 
@@ -829,6 +898,7 @@ def main() -> int:
         return 1
 
     loop = PaperLoop(cfg, place_orders=place, dry_run=dry)
+    loop._timeout_sec = int(args.timeout_sec or 0)
     # Optional: auto-stop after N stream bars (for smoke)
     if args.max_bars > 0:
         orig_on = loop._on_bar_update

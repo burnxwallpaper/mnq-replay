@@ -18,7 +18,7 @@ IB 嘅 `reqRealTimeBars` 係 **5 秒** bar；策略同 backtest 係 **1 分鐘**
 ```bat
 cd C:\Users\leosiu\mnq-paper-smoke
 copy /Y config.example.json config.json
-py -3 -m pip install --user ib_insync
+py -3 -m pip install --user ib_insync tzdata
 py -3 ib_paper_loop.py --dry-run
 ```
 
@@ -59,6 +59,13 @@ py -3 ib_paper_loop.py --dry-run --max-bars 2
 - Long 陽燭 impulse／Short 陰燭 impulse；目標 **2R**；收市穿 5 EMA 收窄到 **1R**（改 TP）  
 - 會計用來回費 **$1.6**（只記帳；IB Paper 另有模擬費用）  
 - 合約：**MNQ · CME** front month（唔係 GLOBEX）
+
+
+### 常見阻礙
+
+- **Error 162 / different IP**：同一個 IB username 喺另一個 IP 開住 TWS／Gateway／手機交易 → 歷史 1m 拉唔到。登出其他 session，等約 1 分鐘再跑。
+- **Windows `tzdata`**：缺 timezone 套件時裝 `tzdata`（見上面 pip）。
+- **週末**：MNQ 多數週五收市到週日晚（芝加哥）先有新 1m bar；dry-run 仍可用 warmup 歷史做驗證。
 
 ### 產出（已 gitignore）
 
