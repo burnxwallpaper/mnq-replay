@@ -1,11 +1,11 @@
 {
   "mode": "local",
   "ibHost": "127.0.0.1",
-  "ibPort": 7497,
+  "ibPort": 4002,
   "clientId": 7,
   "allowLive": false,
   "symbol": "MNQ",
-  "exchange": "GLOBEX",
+  "exchange": "CME",
   "currency": "USD",
   "filters": {
     "bodyRatio": 0.45,

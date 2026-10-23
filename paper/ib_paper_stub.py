@@ -5,12 +5,12 @@ IBKR Paper Trading smoke test (optional).
 Prereqs:
   1. IBKR Account Management → Paper Trading enabled (same login family as live HK).
   2. IB Gateway (or TWS) logged into **Paper**, API enabled.
-  3. API socket port usually **7497** for paper (7496 live) — confirm in Gateway settings.
+  3. API socket port usually **4002** Gateway paper (**4001** live); TWS often **7497**/**7496** — confirm in Gateway settings.
   4. pip install ib_insync
 
 Usage:
   python paper/ib_paper_stub.py
-  python paper/ib_paper_stub.py --port 7497 --host 127.0.0.1 --client-id 7
+  python paper/ib_paper_stub.py --port 4002 --host 127.0.0.1 --client-id 7
 
 This script connects, prints managed accounts, qualifies MNQ on GLOBEX, and exits.
 It does **not** place orders. Next step is a signal loop wired to the TypeScript strategy.
@@ -22,8 +22,8 @@ import json
 import sys
 from pathlib import Path
 
-LIVE_PORTS = {7496}
-DEFAULT_PORT = 7497
+LIVE_PORTS = {7496, 4001}
+DEFAULT_PORT = 4002
 
 
 def load_config() -> dict:
@@ -54,7 +54,7 @@ def main() -> int:
 
     if args.port in LIVE_PORTS and not args.allow_live:
         print(
-            f"Refusing port {args.port} (live-looking). Use paper 7497, or pass --allow-live.",
+            f"Refusing port {args.port} (live-looking). Use paper 4002 (Gateway) / 7497 (TWS), or pass --allow-live.",
             file=sys.stderr,
         )
         return 2

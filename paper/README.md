@@ -14,7 +14,7 @@
 2. **安裝並登入 IB Gateway（建議）或 TWS**  
    - 登入時選 **Paper Trading**（唔好選 Live）。  
    - Configure → Settings → API → **Enable ActiveX and Socket Clients**。  
-   - 記下 **Socket port**：紙上帳戶預設多數係 **7497**；Live 多數係 **7496**。埠號可以改——以 Gateway／TWS 設定為準。  
+   - 記下 **Socket port**：**IB Gateway** Paper 多數係 **4002**（Live **4001**）；**TWS** Paper 多數係 **7497**（Live **7496**）。以設定畫面為準。  
    - Trusted IPs 加 `127.0.0.1`（本機）。
 
 3. **市場數據**  
@@ -34,7 +34,7 @@
    - 本機 fill 以 **1 張**計（同網頁 backtest）；你提到實盤大約 **最多 6 張 MNQ**——`maxContracts` 只係備註／軟上限，未做 sizing 邏輯
 
 6. **安全**  
-   - 預設只准 **paper port 7497**。  
+   - 預設只准 Paper 埠（Gateway **4002**／TWS **7497**）；會拒絕 Live 埠 **4001**／**7496**。  
    - 若 `ibPort` 係 **7496**（或 mode 似 live）而 `allowLive` 唔係 `true`，程式會 **拒絕啟動**。  
    - 未明確改 config 前，唔好指向 live。
 
@@ -68,7 +68,7 @@ npx tsx paper/forward-step.ts --bootstrap
 ## IB Paper 煙霧測試（可選）
 
 ```bash
-# 1. Gateway 已用 Paper 登入，API port 7497
+# 1. Gateway 已用 Paper 登入，API port 4002
 # 2. pip install ib_insync
 python paper/ib_paper_stub.py
 
@@ -85,7 +85,7 @@ npx tsx paper/ib-paper-runner.ts
 
 **Goal:** paper-trade the MNQ impulse strategy before live on IBKR Hong Kong.
 
-1. Enable **Paper Trading** in IBKR Account Management; log **IB Gateway/TWS** into **Paper** (API port usually **7497**, live **7496** — verify in settings).
+1. Enable **Paper Trading** in IBKR Account Management; log **IB Gateway/TWS** into **Paper** (API port usually Gateway **4002** / TWS **7497** (live **4001**/**7496**) — verify in settings).
 2. **Today:** `npm run paper:forward` advances a virtual book from `public/data/mnq-1m-bars.json` after each data refresh (no IB required). `npm run paper:local` is the full-history baseline matching the web Combined backtest (filters 0.45/2/15/1.2, Chicago 09–21, 2R / 1R EMA, $1.6 RT fee, $2/pt, $10k start).
 3. **Optional IB smoke:** `pip install ib_insync` then `python paper/ib_paper_stub.py` (qualifies MNQ, prints account; no orders).
 4. **Safety:** scaffold refuses live-looking port **7496** unless `allowLive: true`. Do not point at live until you explicitly change config.

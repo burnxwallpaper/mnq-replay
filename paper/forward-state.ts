@@ -84,13 +84,13 @@ export type PaperState = {
   >;
 };
 
-const LIVE_PORTS = new Set([7496]);
+const LIVE_PORTS = new Set([7496, 4001]);
 
 export function defaultConfig(): PaperConfig {
   return {
     mode: "local",
     ibHost: "127.0.0.1",
-    ibPort: 7497,
+    ibPort: 4002,
     clientId: 7,
     allowLive: false,
     symbol: "MNQ",
@@ -152,7 +152,7 @@ export function assertPaperSafe(cfg: PaperConfig): void {
   if (liveLike && !cfg.allowLive) {
     throw new Error(
       `Refusing to start: ibPort=${cfg.ibPort} / mode=${cfg.mode} looks like LIVE. ` +
-        `Use paper port 7497 (check Gateway settings) and keep allowLive=false. ` +
+        `Use paper port 4002 (Gateway) or 7497 (TWS) and keep allowLive=false. ` +
         `Only set "allowLive": true in config.json if you intentionally accept live risk.`,
     );
   }
