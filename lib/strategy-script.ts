@@ -426,12 +426,13 @@ export type EquityPoint = {
 
 export type BacktestStats = {
   winRate: number | null;
+  /** Mean R-multiple of closed trades: points PnL / riskPoints. Null if none closed. */
+  averageRr: number | null;
   maxConsecutiveWins: number;
   maxConsecutiveLosses: number;
   maxDrawdown: number;
   averageHoldMs: number | null;
   longestHoldMs: number | null;
-  shortestHoldMs: number | null;
   medianHoldMs: number | null;
   signalCount: number;
   signalIntervalMs: number | null;
@@ -473,8 +474,14 @@ export function summarizeBacktest(
   let maxConsecutiveLosses = 0;
   let wins = 0;
   const holds: number[] = [];
+  const rMultiples: number[] = [];
   for (const trade of closed) {
     holds.push(bars[trade.exitIndex].ts - bars[trade.entryIndex].ts);
+    const sign = trade.side === "short" ? -1 : 1;
+    const points = (trade.exitPrice - trade.entryPrice) * sign;
+    if (trade.riskPoints > 0) {
+      rMultiples.push(points / trade.riskPoints);
+    }
     if (trade.exitReason === "target") {
       wins += 1;
       winStreak += 1;
@@ -524,14 +531,16 @@ export function summarizeBacktest(
         : (sortedHolds[mid - 1] + sortedHolds[mid]) / 2;
   const holdTotal = holds.reduce((sum, value) => sum + value, 0);
 
+  const rrTotal = rMultiples.reduce((sum, value) => sum + value, 0);
+
   return {
     winRate: closed.length === 0 ? null : wins / closed.length,
+    averageRr: rMultiples.length === 0 ? null : rrTotal / rMultiples.length,
     maxConsecutiveWins,
     maxConsecutiveLosses,
     maxDrawdown,
     averageHoldMs: holds.length === 0 ? null : holdTotal / holds.length,
     longestHoldMs: sortedHolds.length === 0 ? null : sortedHolds[sortedHolds.length - 1],
-    shortestHoldMs: sortedHolds.length === 0 ? null : sortedHolds[0],
     medianHoldMs,
     signalCount,
     signalIntervalMs: signalCount === 0 || spanMs <= 0 ? null : spanMs / signalCount,

@@ -24,6 +24,11 @@ function formatPercent(value: number) {
   return Number.isInteger(pct) ? `${pct}%` : `${pct.toFixed(1)}%`;
 }
 
+function formatRr(value: number) {
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}${Math.abs(value).toFixed(2)} R`;
+}
+
 function formatHold(ms: number) {
   const minutes = Math.max(0, Math.round(ms / 60_000));
   if (minutes < 60) return `${minutes}m`;
@@ -212,6 +217,11 @@ function StatsGrid({ stats, idPrefix }: { stats: BacktestStats; idPrefix: string
         value={stats.winRate === null ? "—" : formatPercent(stats.winRate)}
       />
       <Stat
+        id={`${idPrefix}-avg-rr`}
+        label="Avg RR ratio"
+        value={stats.averageRr === null ? "—" : formatRr(stats.averageRr)}
+      />
+      <Stat
         id={`${idPrefix}-max-wins`}
         label="Max consecutive wins"
         value={String(stats.maxConsecutiveWins)}
@@ -235,11 +245,6 @@ function StatsGrid({ stats, idPrefix }: { stats: BacktestStats; idPrefix: string
         id={`${idPrefix}-longest-hold`}
         label="Longest holding time"
         value={stats.longestHoldMs === null ? "—" : formatHold(stats.longestHoldMs)}
-      />
-      <Stat
-        id={`${idPrefix}-shortest-hold`}
-        label="Shortest holding time"
-        value={stats.shortestHoldMs === null ? "—" : formatHold(stats.shortestHoldMs)}
       />
       <Stat
         id={`${idPrefix}-median-hold`}
