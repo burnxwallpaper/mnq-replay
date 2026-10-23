@@ -1,94 +1,96 @@
-# Paper / 模擬倉 scaffold（MNQ impulse）
+# Paper / 模擬倉（MNQ impulse）
 
 用 Interactive Brokers（香港）**Paper Trading**，或本機 bar 檔，先運作一段時間驗證策略，再考慮實盤。
 
-這不是完整自動交易機器人；目標是：**本地 forward paper 今天就能跑**，IB 連線只做安全 stub／煙霧測試。
-
 ---
 
-## 建議路徑（IBKR HK）
+## IBKR Paper 即時循環（已實作）
 
-1. **開通 Paper Trading**  
-   登入 [IBKR Account Management](https://www.interactivebrokers.com/) → **Paper Trading**（與 live 帳戶同一登入體系）。紙上帳戶有獨立帳號／資金，下單唔會動到真錢。
+`paper/ib_paper_loop.py`：長連 Gateway → 一次 warmup 歷史 1m → `keepUpToDate` 串流 → **每根完成嘅 1m bar** 先決策 →（可選）限價＋bracket。
 
-2. **安裝並登入 IB Gateway（建議）或 TWS**  
-   - 登入時選 **Paper Trading**（唔好選 Live）。  
-   - Configure → Settings → API → **Enable ActiveX and Socket Clients**。  
-   - 記下 **Socket port**：**IB Gateway** Paper 多數係 **4002**（Live **4001**）；**TWS** Paper 多數係 **7497**（Live **7496**）。以設定畫面為準。  
-   - Trusted IPs 加 `127.0.0.1`（本機）。
+### 點解用 keepUpToDate，唔用 reqRealTimeBars？
 
-3. **市場數據**  
-   Paper 可能係延遲報價（除非你有訂閱即時）。仍然可以測：**下單流程、連線、合約資格、風控**。訊號品質要以你有即時／足夠數據為準。
+IB 嘅 `reqRealTimeBars` 係 **5 秒** bar；策略同 backtest 係 **1 分鐘**。  
+所以用 `reqHistoricalData(..., barSizeSetting="1 min", keepUpToDate=True)`：啟動拉一次歷史做 SMA／EMA，之後只處理新完成嘅 1m bar，**唔會每分鐘重拉成段歷史**。
 
-4. **MNQ 合約**  
-   - `FUT` · symbol `MNQ` · exchange `GLOBEX` · currency `USD`  
-   - 跟月（front month），到期前要 **rollover**。  
-   - 本 scaffold 嘅 Python stub 會列出可用到期，方便你睇 front month。
+### Windows 啟動（Gateway Paper 已開、埠 4002）
 
-5. **對齊 backtest 假設**（見 `config.example.json`）  
-   - Session：`America/Chicago` **09:00–21:00**（唔開新倉）  
-   - Filters 預設：**0.45 / 2 / 15 / 1.2**（bodyRatio · minBody · volLen · volMult）  
-   - 目標 2R；收市穿 5 EMA 收窄到 1R  
-   - 來回手續費預設 **$1.6**／平倉單  
-   - 點值 **$2／點**，起始資金 **$10,000**  
-   - 本機 fill 以 **1 張**計（同網頁 backtest）；你提到實盤大約 **最多 6 張 MNQ**——`maxContracts` 只係備註／軟上限，未做 sizing 邏輯
-
-6. **安全**  
-   - 預設只准 Paper 埠（Gateway **4002**／TWS **7497**）；會拒絕 Live 埠 **4001**／**7496**。  
-   - 若 `ibPort` 係 **7496**（或 mode 似 live）而 `allowLive` 唔係 `true`，程式會 **拒絕啟動**。  
-   - 未明確改 config 前，唔好指向 live。
-
----
-
-## 今日就能用：本機 forward paper（唔使 IB）
-
-策略引擎同網頁一樣（`lib/strategy-script.ts`）。你更新 `public/data/mnq-1m-bars.json` 之後跑一步，只會入帳 **新 bar 之後平倉** 的虛擬單。
-
-```bash
-cd /path/to/mnq-replay
-cp paper/config.example.json paper/config.json   # 可改 filters / fee
-npm run paper:local      # 全歷史 baseline（對照網頁 Combined）
-npm run paper:forward    # 第一次：錨定最新 bar，唔倒灌歷史
-# 之後每次刷新 bar 數據再跑：
-npm run paper:forward
-# 若想一次用全歷史灌入模擬倉：
-npx tsx paper/forward-step.ts --bootstrap
+```bat
+cd C:\Users\leosiu\mnq-paper-smoke
+copy /Y config.example.json config.json
+py -3 -m pip install --user ib_insync
+py -3 ib_paper_loop.py --dry-run
 ```
 
-產出（已 gitignore）：
+或喺 repo：
+
+```bat
+cd path\to\mnq-replay
+copy paper\config.example.json paper\config.json
+py -3 paper\ib_paper_loop.py --dry-run
+```
+
+**只跑數根 stream bar 就停（煙霧測試）：**
+
+```bat
+py -3 ib_paper_loop.py --dry-run --max-bars 2
+```
+
+### dry-run vs place-orders
+
+| 模式 | 指令 | 行為 |
+|------|------|------|
+| **Dry-run（預設）** | `py -3 ib_paper_loop.py --dry-run` | 連 Paper、收 1m、印訊號／收窄；**唔下單**（readonly） |
+| **Paper 下單** | `py -3 ib_paper_loop.py --place-orders` | 訊號時掛 **Limit@收市價**＋TP／SL bracket；`maxContracts` 預設 **1** |
+
+`config.json` 入面 `placeOrders: false` 係預設；即使改成 true，都建議第一次用 CLI `--dry-run` 確認 bar／訊號先。
+
+### Kill switch（停手）
+
+1. **終端** `Ctrl+C` — 斷 API、寫 `state.json`；已掛嘅 bracket **可能仲喺 Gateway**  
+2. **取消未成交／子單**：Gateway／TWS → 訂單簿取消；或重開 Gateway 前先清  
+3. **緊急**：喺 TWS／Gateway 將帳戶設 **Read-Only API**，或登出 Gateway  
+4. **程式安全**：預設拒絕 Live 埠 **4001／7496**（除非 `allowLive: true`）
+
+### 策略對齊（同網頁 Combined 預設）
+
+- Filters：`0.45 / 2 / 15 / 1.2`  
+- Session：`America/Chicago` **09–21**（含）先開新倉  
+- Long 陽燭 impulse／Short 陰燭 impulse；目標 **2R**；收市穿 5 EMA 收窄到 **1R**（改 TP）  
+- 會計用來回費 **$1.6**（只記帳；IB Paper 另有模擬費用）  
+- 合約：**MNQ · CME** front month（唔係 GLOBEX）
+
+### 產出（已 gitignore）
 
 | 檔案 | 用途 |
 |------|------|
-| `paper/state.json` | 上次處理到嘅 bar ts、權益、峰值、未平倉 |
-| `paper/trades.jsonl` | 已平倉虛擬單（一行一單） |
-| `paper/config.json` | 你的本地設定（由 example 複製） |
+| `paper/state.json` | 權益、未平倉、合約、上次 bar |
+| `paper/trades.jsonl` | 平倉會計紀錄 |
+| `paper/config.json` | 本地設定（由 example 複製） |
 
 ---
 
-## IB Paper 煙霧測試（可選）
+## 本機 forward paper（唔使 IB）
 
 ```bash
-# 1. Gateway 已用 Paper 登入，API port 4002
-# 2. pip install ib_insync
-python paper/ib_paper_stub.py
-
-# TypeScript stub（唔下單、唔強制裝 IB SDK）：
-npx tsx paper/ib-paper-runner.ts
+cp paper/config.example.json paper/config.json
+npm run paper:local      # 全歷史 baseline
+npm run paper:forward    # 數據更新後只入帳新 bar
 ```
 
-成功會印 managed accounts + MNQ front-ish contract。  
-**下一步（尚未實作）**：1 分鐘 bar 循環 → 套用同款 impulse 訊號 → bracket（止損／目標）→ 記錄成交；並處理 rollover、斷線重連、每日虧損上限。
+---
+
+## IB 煙霧測試（只連線）
+
+```bash
+py -3 paper/ib_paper_stub.py
+```
 
 ---
 
 ## English (short)
 
-**Goal:** paper-trade the MNQ impulse strategy before live on IBKR Hong Kong.
-
-1. Enable **Paper Trading** in IBKR Account Management; log **IB Gateway/TWS** into **Paper** (API port usually Gateway **4002** / TWS **7497** (live **4001**/**7496**) — verify in settings).
-2. **Today:** `npm run paper:forward` advances a virtual book from `public/data/mnq-1m-bars.json` after each data refresh (no IB required). `npm run paper:local` is the full-history baseline matching the web Combined backtest (filters 0.45/2/15/1.2, Chicago 09–21, 2R / 1R EMA, $1.6 RT fee, $2/pt, $10k start).
-3. **Optional IB smoke:** `pip install ib_insync` then `python paper/ib_paper_stub.py` (qualifies MNQ, prints account; no orders).
-4. **Safety:** scaffold refuses live-looking port **7496** unless `allowLive: true`. Do not point at live until you explicitly change config.
-5. **Not included yet:** live IB order loop, sizing to ~6 MNQ, rollover automation, production watchdog.
-
-Copy `config.example.json` → `config.json` before customizing.
+- **Loop:** `py -3 paper/ib_paper_loop.py --dry-run` then `--place-orders` on Paper (port **4002**).  
+- **Bars:** 1m via historical `keepUpToDate` (not 5s realtime bars).  
+- **Orders:** limit at bar close + bracket stop/target; EMA tighten modifies TP to 1R.  
+- **Safety:** refuses 4001/7496; Ctrl+C stops the loop — cancel resting orders in Gateway if needed.

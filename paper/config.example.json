@@ -1,8 +1,8 @@
 {
-  "mode": "local",
+  "mode": "ib-paper",
   "ibHost": "127.0.0.1",
   "ibPort": 4002,
-  "clientId": 7,
+  "clientId": 17,
   "allowLive": false,
   "symbol": "MNQ",
   "exchange": "CME",
@@ -17,5 +17,8 @@
   "pointValue": 2,
   "startingEquity": 10000,
   "maxContracts": 1,
-  "side": "both"
+  "side": "both",
+  "placeOrders": false,
+  "warmupBars": 400,
+  "limitOffsetTicks": 0
 }

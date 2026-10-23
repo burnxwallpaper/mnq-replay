@@ -12,7 +12,7 @@ Usage:
   python paper/ib_paper_stub.py
   python paper/ib_paper_stub.py --port 4002 --host 127.0.0.1 --client-id 7
 
-This script connects, prints managed accounts, qualifies MNQ on GLOBEX, and exits.
+This script connects, prints managed accounts, qualifies MNQ on CME, and exits.
 It does **not** place orders. Next step is a signal loop wired to the TypeScript strategy.
 """
 from __future__ import annotations
@@ -48,7 +48,7 @@ def main() -> int:
         help="Required if port looks like live (7496).",
     )
     parser.add_argument("--symbol", default=cfg.get("symbol", "MNQ"))
-    parser.add_argument("--exchange", default=cfg.get("exchange", "GLOBEX"))
+    parser.add_argument("--exchange", default=cfg.get("exchange", "CME"))
     parser.add_argument("--currency", default=cfg.get("currency", "USD"))
     args = parser.parse_args()
 
