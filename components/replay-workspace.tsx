@@ -35,6 +35,7 @@ import {
 const PLAY_MS = 180;
 const INITIAL_VISIBLE = 180;
 const RUNNERS_STORAGE_KEY = "mnq-replay.enabledRunners";
+const SHOW_PRICE_CHART_STORAGE_KEY = "mnq-replay.showPriceChart";
 
 function formatPoints(value: number) {
   const sign = value > 0 ? "+" : "";
@@ -90,6 +91,27 @@ function writeEntryFilters(filters: EntryFilters) {
   }
 }
 
+function readShowPriceChart(): boolean {
+  try {
+    const raw = window.localStorage.getItem(SHOW_PRICE_CHART_STORAGE_KEY);
+    if (raw === null) return false;
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    const parsed: unknown = JSON.parse(raw);
+    return parsed === true;
+  } catch {
+    return false;
+  }
+}
+
+function writeShowPriceChart(show: boolean) {
+  try {
+    window.localStorage.setItem(SHOW_PRICE_CHART_STORAGE_KEY, show ? "true" : "false");
+  } catch {
+    // Ignore private-mode storage failures.
+  }
+}
+
 export function ReplayWorkspace() {
   const [bars, setBars] = useState<FixtureBar[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -102,7 +124,9 @@ export function ReplayWorkspace() {
   const [fitRevision, setFitRevision] = useState(0);
   const [entryFilters, setEntryFilters] = useState<EntryFilters>(DEFAULT_ENTRY_FILTERS);
   const [filtersEpoch, setFiltersEpoch] = useState(0);
+  const [showPriceChart, setShowPriceChart] = useState(false);
   const filtersHydratedRef = useRef(false);
+  const priceChartHydratedRef = useRef(false);
   const lastIndex = bars ? bars.length - 1 : 0;
   const toggleRef = useRef<() => void>(() => {});
 
@@ -111,12 +135,19 @@ export function ReplayWorkspace() {
     setLongEnabled(saved.long);
     setShortEnabled(saved.short);
     setEntryFilters(readEntryFilters());
+    setShowPriceChart(readShowPriceChart());
     filtersHydratedRef.current = true;
+    priceChartHydratedRef.current = true;
   }, []);
 
   useEffect(() => {
     writeEnabledRunners(longEnabled, shortEnabled);
   }, [longEnabled, shortEnabled]);
+
+  useEffect(() => {
+    if (!priceChartHydratedRef.current) return;
+    writeShowPriceChart(showPriceChart);
+  }, [showPriceChart]);
 
   useEffect(() => {
     if (!filtersHydratedRef.current) return;
@@ -379,6 +410,7 @@ export function ReplayWorkspace() {
 
       <div className="grid flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
         <div className="flex min-w-0 flex-col gap-3">
+        {showPriceChart ? (
         <section
           aria-label="Candlestick chart"
           className="relative min-h-[340px] flex-1 overflow-hidden rounded-xl bg-[oklch(0.145_0.016_255)] ring-1 ring-foreground/10 lg:min-h-[520px]"
@@ -391,6 +423,15 @@ export function ReplayWorkspace() {
             <span>Exit</span>
             <span className="text-[#39d0ff]">EMA 5</span>
           </div>
+          <div className="absolute top-2 right-2 z-10">
+            <button
+              type="button"
+              onClick={() => setShowPriceChart(false)}
+              className="rounded-md border border-foreground/15 bg-[oklch(0.18_0.02_255)] px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              Hide price chart
+            </button>
+          </div>
           <CandleChart
             bars={bars}
             markers={chartMarkers}
@@ -399,6 +440,23 @@ export function ReplayWorkspace() {
             labelStrategies={bothRunners}
           />
         </section>
+        ) : (
+        <section
+          aria-label="Price chart hidden"
+          className="flex items-center justify-between gap-3 rounded-xl bg-[oklch(0.145_0.016_255)] px-3 py-2 ring-1 ring-foreground/10"
+        >
+          <p className="text-xs text-muted-foreground">
+            Price chart hidden (faster). Equity / backtest report stays below.
+          </p>
+          <button
+            type="button"
+            onClick={() => setShowPriceChart(true)}
+            className="shrink-0 rounded-md border border-foreground/15 bg-[oklch(0.18_0.02_255)] px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            Show price chart
+          </button>
+        </section>
+        )}
         <BacktestReport report={multiReport} />
         </div>
 
