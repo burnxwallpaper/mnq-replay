@@ -3,7 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { EntryFilters } from "@/lib/strategy-script";
-import { DEFAULT_ENTRY_FILTERS, normalizeEntryFilters } from "@/lib/strategy-script";
+import {
+  DEFAULT_ENTRY_FILTERS,
+  DEFAULT_ROUND_TRIP_FEE_USD,
+  normalizeEntryFilters,
+  normalizeRoundTripFee,
+} from "@/lib/strategy-script";
 
 type Field = {
   key: keyof EntryFilters;
@@ -58,20 +63,35 @@ function filtersEqual(a: EntryFilters, b: EntryFilters) {
   );
 }
 
+export type EntryFiltersSave = {
+  filters: EntryFilters;
+  roundTripFeeUsd: number;
+};
+
 export function EntryFiltersPanel({
   value,
+  feeUsd,
   onChange,
 }: {
   value: EntryFilters;
-  onChange: (next: EntryFilters) => void;
+  feeUsd: number;
+  onChange: (next: EntryFiltersSave) => void;
 }) {
   const [draft, setDraft] = useState<EntryFilters>(value);
+  const [feeDraft, setFeeDraft] = useState<number>(feeUsd);
 
   useEffect(() => {
     setDraft(value);
   }, [value]);
 
-  const dirty = useMemo(() => !filtersEqual(draft, value), [draft, value]);
+  useEffect(() => {
+    setFeeDraft(feeUsd);
+  }, [feeUsd]);
+
+  const dirty = useMemo(
+    () => !filtersEqual(draft, value) || feeDraft !== feeUsd,
+    [draft, value, feeDraft, feeUsd],
+  );
 
   return (
     <section
@@ -85,8 +105,8 @@ export function EntryFiltersPanel({
             Entry filters
           </h2>
           <p className="text-xs text-muted-foreground">
-            改數字後撳 Save 先套用到 Long／Short 預設腳本（session + 5 EMA 不變）· body ≥ ratio ·
-            body pts · vol &gt; SMA × mult
+            改數字後撳 Save 先套用到 Long／Short 預設腳本同手續費（session + 5 EMA 不變）· body ≥
+            ratio · body pts · vol &gt; SMA × mult · round-trip fee
             {dirty ? (
               <span className="ml-1 text-amber-300/90">· unsaved</span>
             ) : null}
@@ -96,23 +116,32 @@ export function EntryFiltersPanel({
           <button
             type="button"
             className="font-mono text-xs text-muted-foreground underline-offset-2 hover:underline"
-            onClick={() => setDraft(DEFAULT_ENTRY_FILTERS)}
+            onClick={() => {
+              setDraft(DEFAULT_ENTRY_FILTERS);
+              setFeeDraft(DEFAULT_ROUND_TRIP_FEE_USD);
+            }}
           >
             Reset {DEFAULT_ENTRY_FILTERS.bodyRatio} / {DEFAULT_ENTRY_FILTERS.minBody} /{" "}
-            {DEFAULT_ENTRY_FILTERS.volLen}×{DEFAULT_ENTRY_FILTERS.volMult}
+            {DEFAULT_ENTRY_FILTERS.volLen}×{DEFAULT_ENTRY_FILTERS.volMult} · fee $
+            {DEFAULT_ROUND_TRIP_FEE_USD}
           </button>
           <button
             type="button"
             id="entry-filters-save"
             disabled={!dirty}
             className="rounded-md bg-foreground px-2.5 py-1 font-mono text-xs text-background disabled:cursor-not-allowed disabled:opacity-40"
-            onClick={() => onChange(normalizeEntryFilters(draft))}
+            onClick={() =>
+              onChange({
+                filters: normalizeEntryFilters(draft),
+                roundTripFeeUsd: normalizeRoundTripFee(feeDraft),
+              })
+            }
           >
             Save
           </button>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         {FIELDS.map((field) => (
           <label
             key={field.key}
@@ -140,6 +169,29 @@ export function EntryFiltersPanel({
             <span className="text-[10px] text-muted-foreground">{field.help}</span>
           </label>
         ))}
+        <label
+          className="flex flex-col gap-1 rounded-md bg-black/20 px-2 py-1.5 ring-1 ring-foreground/10"
+          title="每單完整來回手續費（USD）"
+        >
+          <span className="font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
+            Round-trip fee ($)
+          </span>
+          <input
+            id="entry-filter-roundTripFeeUsd"
+            type="number"
+            inputMode="decimal"
+            step={0.1}
+            min={0}
+            value={feeDraft}
+            onChange={(event) => {
+              const raw = event.target.valueAsNumber;
+              if (!Number.isFinite(raw)) return;
+              setFeeDraft(Math.max(0, raw));
+            }}
+            className="w-full bg-transparent font-mono text-sm outline-none"
+          />
+          <span className="text-[10px] text-muted-foreground">每單來回扣費</span>
+        </label>
       </div>
     </section>
   );

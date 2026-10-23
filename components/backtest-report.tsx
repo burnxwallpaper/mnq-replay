@@ -222,6 +222,16 @@ function StatsGrid({ stats, idPrefix }: { stats: BacktestStats; idPrefix: string
         value={stats.averageRr === null ? "—" : formatRr(stats.averageRr)}
       />
       <Stat
+        id={`${idPrefix}-trade-count`}
+        label="Trade count"
+        value={String(stats.closedTrades)}
+      />
+      <Stat
+        id={`${idPrefix}-total-fees`}
+        label="Total fees"
+        value={formatPnl(-stats.totalFees)}
+      />
+      <Stat
         id={`${idPrefix}-max-wins`}
         label="Max consecutive wins"
         value={String(stats.maxConsecutiveWins)}

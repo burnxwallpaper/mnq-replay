@@ -3,6 +3,16 @@ import type { OhlcvBar } from "@/lib/strategies/types";
 
 export const STRATEGY_STORAGE_KEY = "mnq-replay.strategyScript";
 export const ENTRY_FILTERS_STORAGE_KEY = "mnq-replay.entryFilters";
+export const ROUND_TRIP_FEE_STORAGE_KEY = "mnq-replay.roundTripFeeUsd";
+
+/** USD charged once when a trade closes (full round-trip). */
+export const DEFAULT_ROUND_TRIP_FEE_USD = 1.6;
+
+export function normalizeRoundTripFee(raw: unknown): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_ROUND_TRIP_FEE_USD;
+  return n;
+}
 
 export type EntryFilters = {
   /** Min body / range ratio, e.g. 0.45 */
@@ -443,6 +453,12 @@ export type BacktestStats = {
   /** Trough of the equity curve (includes starting capital). */
   troughEquity: number;
   startingEquity: number;
+  /** Number of closed trades in this summary. */
+  closedTrades: number;
+  /** Round-trip fee USD applied per closed trade. */
+  feePerTrade: number;
+  /** Total fees deducted from closed trades. */
+  totalFees: number;
 };
 
 function isClosed(
@@ -464,7 +480,9 @@ function tradePnl(trade: ScriptTrade, exitPrice: number) {
 export function summarizeBacktest(
   run: { markers: ScriptMarker[]; trades: ScriptTrade[] },
   bars: OhlcvBar[],
+  feeUsd: number = DEFAULT_ROUND_TRIP_FEE_USD,
 ): BacktestStats {
+  const feePerTrade = normalizeRoundTripFee(feeUsd);
   const closed = run.trades
     .filter(isClosed)
     .sort((left, right) => left.exitIndex - right.exitIndex || left.entryIndex - right.entryIndex);
@@ -497,9 +515,11 @@ export function summarizeBacktest(
   const equity: EquityPoint[] = [{ ts: bars[0].ts, equity: STARTING_NET_ASSET }];
   let cursorEquity = STARTING_NET_ASSET;
   for (const trade of closed) {
-    cursorEquity += tradePnl(trade, trade.exitPrice);
+    // Deduct round-trip fee only when the exit fills — not on open MTM.
+    cursorEquity += tradePnl(trade, trade.exitPrice) - feePerTrade;
     equity.push({ ts: bars[trade.exitIndex].ts, equity: cursorEquity });
   }
+  const totalFees = closed.length * feePerTrade;
   const open = run.trades.find((trade) => trade.exitIndex === null);
   const lastBar = bars[bars.length - 1];
   if (open) {
@@ -549,6 +569,9 @@ export function summarizeBacktest(
     peakEquity: peak,
     troughEquity: trough,
     startingEquity: STARTING_NET_ASSET,
+    closedTrades: closed.length,
+    feePerTrade,
+    totalFees,
   };
 }
 
@@ -556,6 +579,7 @@ export function scoreScript(
   trades: ScriptTrade[],
   bars: OhlcvBar[],
   cursor: number,
+  feeUsd: number = DEFAULT_ROUND_TRIP_FEE_USD,
 ): ScriptScore {
   let realizedPoints = 0;
   let openPoints = 0;
@@ -564,6 +588,7 @@ export function scoreScript(
   let wins = 0;
   let losses = 0;
   const pointValue = MNQ_POINT_VALUE;
+  const feePerTrade = normalizeRoundTripFee(feeUsd);
 
   for (const trade of trades) {
     if (trade.entryIndex > cursor) continue;
@@ -581,9 +606,11 @@ export function scoreScript(
   }
 
   const totalPoints = realizedPoints + openPoints;
+  // Dollar PnL nets round-trip fee on closed trades only; open MTM stays points*$2.
+  const totalPnl = totalPoints * pointValue - closedTrades * feePerTrade;
   return {
     totalPoints,
-    totalPnl: totalPoints * pointValue,
+    totalPnl,
     realizedPoints,
     openPoints,
     closedTrades,
@@ -646,15 +673,17 @@ export function mergeScriptRuns(named: NamedScriptRun[]): ScriptRun {
 export function summarizeMultiBacktest(
   named: NamedScriptRun[],
   bars: OhlcvBar[],
+  feeUsd: number = DEFAULT_ROUND_TRIP_FEE_USD,
 ): MultiBacktestReport | null {
   const okNamed = named.filter((item) => item.run.ok);
   if (okNamed.length === 0 || bars.length === 0) return null;
+  const fee = normalizeRoundTripFee(feeUsd);
 
   const perStrategy = okNamed.map((item) => ({
     id: item.id,
     name: item.name,
     color: item.color,
-    stats: summarizeBacktest(item.run, bars),
+    stats: summarizeBacktest(item.run, bars, fee),
   }));
 
   const series: EquitySeries[] = perStrategy.map((item) => ({
@@ -668,7 +697,7 @@ export function summarizeMultiBacktest(
   }));
 
   const merged = mergeScriptRuns(okNamed);
-  const combinedStats = summarizeBacktest(merged, bars);
+  const combinedStats = summarizeBacktest(merged, bars, fee);
   if (okNamed.length > 1) {
     series.push({
       id: "combined",

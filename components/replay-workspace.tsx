@@ -18,12 +18,15 @@ import {
 import { EntryFiltersPanel } from "@/components/entry-filters";
 import {
   DEFAULT_ENTRY_FILTERS,
+  DEFAULT_ROUND_TRIP_FEE_USD,
   ENTRY_FILTERS_STORAGE_KEY,
+  ROUND_TRIP_FEE_STORAGE_KEY,
   STRATEGY_COLORS,
   buildLongStrategyScript,
   buildShortStrategyScript,
   mergeScriptRuns,
   normalizeEntryFilters,
+  normalizeRoundTripFee,
   runStrategyScript,
   scoreScript,
   summarizeMultiBacktest,
@@ -91,6 +94,27 @@ function writeEntryFilters(filters: EntryFilters) {
   }
 }
 
+function readRoundTripFee(): number {
+  try {
+    const raw = window.localStorage.getItem(ROUND_TRIP_FEE_STORAGE_KEY);
+    if (raw === null) return DEFAULT_ROUND_TRIP_FEE_USD;
+    return normalizeRoundTripFee(JSON.parse(raw));
+  } catch {
+    return DEFAULT_ROUND_TRIP_FEE_USD;
+  }
+}
+
+function writeRoundTripFee(feeUsd: number) {
+  try {
+    window.localStorage.setItem(
+      ROUND_TRIP_FEE_STORAGE_KEY,
+      JSON.stringify(normalizeRoundTripFee(feeUsd)),
+    );
+  } catch {
+    // Ignore private-mode storage failures.
+  }
+}
+
 function readShowPriceChart(): boolean {
   try {
     const raw = window.localStorage.getItem(SHOW_PRICE_CHART_STORAGE_KEY);
@@ -123,6 +147,7 @@ export function ReplayWorkspace() {
   const [shortEnabled, setShortEnabled] = useState(false);
   const [fitRevision, setFitRevision] = useState(0);
   const [entryFilters, setEntryFilters] = useState<EntryFilters>(DEFAULT_ENTRY_FILTERS);
+  const [roundTripFeeUsd, setRoundTripFeeUsd] = useState(DEFAULT_ROUND_TRIP_FEE_USD);
   const [filtersEpoch, setFiltersEpoch] = useState(0);
   const [showPriceChart, setShowPriceChart] = useState(false);
   const filtersHydratedRef = useRef(false);
@@ -135,6 +160,7 @@ export function ReplayWorkspace() {
     setLongEnabled(saved.long);
     setShortEnabled(saved.short);
     setEntryFilters(readEntryFilters());
+    setRoundTripFeeUsd(readRoundTripFee());
     setShowPriceChart(readShowPriceChart());
     filtersHydratedRef.current = true;
     priceChartHydratedRef.current = true;
@@ -153,6 +179,11 @@ export function ReplayWorkspace() {
     if (!filtersHydratedRef.current) return;
     writeEntryFilters(entryFilters);
   }, [entryFilters]);
+
+  useEffect(() => {
+    if (!filtersHydratedRef.current) return;
+    writeRoundTripFee(roundTripFeeUsd);
+  }, [roundTripFeeUsd]);
 
   useEffect(() => {
     let cancelled = false;
@@ -257,13 +288,13 @@ export function ReplayWorkspace() {
   const periodEnd = bars ? bars.length - 1 : 0;
   const score = useMemo(() => {
     if (!bars || !mergedRun?.ok) return null;
-    return scoreScript(mergedRun.trades, bars, periodEnd);
-  }, [mergedRun, periodEnd, bars]);
+    return scoreScript(mergedRun.trades, bars, periodEnd, roundTripFeeUsd);
+  }, [mergedRun, periodEnd, bars, roundTripFeeUsd]);
   const multiReport = useMemo(() => {
     if (!bars || namedRuns.length === 0) return null;
     if (namedRuns.some((item) => !item.run.ok)) return null;
-    return summarizeMultiBacktest(namedRuns, bars);
-  }, [namedRuns, bars]);
+    return summarizeMultiBacktest(namedRuns, bars, roundTripFeeUsd);
+  }, [namedRuns, bars, roundTripFeeUsd]);
 
   if (loadError) {
     return (
@@ -383,8 +414,10 @@ export function ReplayWorkspace() {
 
       <EntryFiltersPanel
         value={entryFilters}
+        feeUsd={roundTripFeeUsd}
         onChange={(next) => {
-          setEntryFilters(normalizeEntryFilters(next));
+          setEntryFilters(normalizeEntryFilters(next.filters));
+          setRoundTripFeeUsd(normalizeRoundTripFee(next.roundTripFeeUsd));
           setFiltersEpoch((n) => n + 1);
           setFitRevision((current) => current + 1);
         }}
