@@ -96,7 +96,7 @@ export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FI
 // ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
-// Entry fills at the signal close. One position at a time.
+// Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
 // Impulse entries still target 2.5R. A close below the 5 EMA tightens that to 1R.
 // New longs only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
@@ -130,7 +130,7 @@ export function buildShortStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_F
 // ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
-// Entry fills at the signal close. One position at a time.
+// Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
 // Impulse entries still target 2.5R. A close above the 5 EMA tightens that to 1R.
 // New shorts only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
@@ -165,6 +165,10 @@ export function isStaleDefaultScript(script: string) {
   }
   // Pre-2.5R defaults (including prior session cutoffs): still say target 2R.
   if (script.includes("Impulse entries still target 2R")) {
+    return true;
+  }
+  // Pre-pending-limit: instant fill at signal close (paper now expires unfilled after 2 bars).
+  if (script.includes("Entry fills at the signal close")) {
     return true;
   }
   // Pre-cutoff defaults used hour-only Chicago 09–21; upgrade to 09:00–20:29 entry window.
@@ -275,6 +279,33 @@ function readSignal(value: unknown): {
 }
 
 
+/** Completed 1m bars after the signal bar an unfilled entry limit may wait (matches paper). */
+export const ENTRY_LIMIT_EXPIRY_BARS = 2;
+
+/**
+ * Pending entry limit fill (paper Limit @ signal close).
+ * Long buy-limit: fill if traded at/through limit without already opening through stop.
+ * Short sell-limit: mirror.
+ * Returns fill price or null.
+ */
+function resolveEntryLimitFill(
+  bar: OhlcvBar,
+  side: "long" | "short",
+  limit: number,
+  stop: number,
+): number | null {
+  if (side === "long") {
+    if (bar.o <= stop) return null;
+    if (bar.o <= limit) return bar.o;
+    if (bar.l <= limit) return limit;
+    return null;
+  }
+  if (bar.o >= stop) return null;
+  if (bar.o >= limit) return bar.o;
+  if (bar.h >= limit) return limit;
+  return null;
+}
+
 /** Realistic OHLC fill: gap-through at open, else level if touched. Prefer stop if both. */
 function resolveExitFill(
   bar: OhlcvBar,
@@ -311,7 +342,27 @@ function compile(source: string): BarFn {
   return created;
 }
 
-export function runStrategyScript(bars: OhlcvBar[], source: string, strategyId = "script"): ScriptRun {
+export type RunStrategyOptions = {
+  /**
+   * Bars after the signal an unfilled entry limit may wait.
+   * `<= 0` = legacy instant fill at signal close.
+   * Default `ENTRY_LIMIT_EXPIRY_BARS` (2) matches paper.
+   */
+  entryLimitExpiryBars?: number;
+};
+
+export function runStrategyScript(
+  bars: OhlcvBar[],
+  source: string,
+  strategyId = "script",
+  options: RunStrategyOptions = {},
+): ScriptRun {
+  const expiryBars =
+    options.entryLimitExpiryBars === undefined
+      ? ENTRY_LIMIT_EXPIRY_BARS
+      : options.entryLimitExpiryBars;
+  const instantFill = expiryBars <= 0;
+
   let fn: BarFn;
   try {
     fn = compile(source);
@@ -352,36 +403,76 @@ export function runStrategyScript(bars: OhlcvBar[], source: string, strategyId =
   const markers: ScriptMarker[] = [];
   const trades: ScriptTrade[] = [];
   let open: ScriptTrade | null = null;
+  type PendingEntry = {
+    side: "long" | "short";
+    stop: number;
+    target: number;
+    risk: number;
+    limit: number;
+    signalIndex: number;
+    barsWaited: number;
+  };
+  let pending: PendingEntry | null = null;
+
+  const makeOpen = (
+    i: number,
+    fillPrice: number,
+    from: { side: "long" | "short"; stop: number; target: number; risk: number; signalIndex: number },
+  ): ScriptTrade => {
+    markers.push({
+      strategyId,
+      barIndex: i,
+      visibleFromIndex: i,
+      kind: "entry",
+      win: null,
+      price: fillPrice,
+      side: from.side,
+    });
+    return {
+      strategyId,
+      side: from.side,
+      signalIndex: from.signalIndex,
+      entryIndex: i,
+      exitIndex: null,
+      entryPrice: fillPrice,
+      stopPrice: from.stop,
+      targetPrice: from.target,
+      exitPrice: null,
+      exitReason: null,
+      riskPoints: from.risk,
+    };
+  };
 
   for (let i = 0; i < bars.length; i += 1) {
     const bar = bars[i];
-    if (open) {
+    if (open !== null) {
+      const pos = open;
       const stopped =
-        open.side === "long" ? bar.l <= open.stopPrice : bar.h >= open.stopPrice;
+        pos.side === "long" ? bar.l <= pos.stopPrice : bar.h >= pos.stopPrice;
       const targeted =
-        open.side === "long" ? bar.h >= open.targetPrice : bar.l <= open.targetPrice;
+        pos.side === "long" ? bar.h >= pos.targetPrice : bar.l <= pos.targetPrice;
       if (!stopped && !targeted) {
         let managed: unknown;
         try {
           managed = fn(bar, i, bars, ta, {
-            side: open.side,
-            entry: open.entryPrice,
-            stop: open.stopPrice,
-            target: open.targetPrice,
-            risk: open.riskPoints,
+            side: pos.side,
+            entry: pos.entryPrice,
+            stop: pos.stopPrice,
+            target: pos.targetPrice,
+            risk: pos.riskPoints,
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : "Script threw.";
           return { ok: false, error: `Bar ${i + 1}: ${message}`, markers: [], trades: [] };
         }
         const nextTarget = readTarget(managed);
-        if (nextTarget !== null) open.targetPrice = nextTarget;
+        if (nextTarget !== null) pos.targetPrice = nextTarget;
       }
-      const exit = resolveExitFill(bar, open.side, open.stopPrice, open.targetPrice);
+      const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
       if (exit) {
-        open.exitIndex = i;
-        open.exitReason = exit.reason;
-        open.exitPrice = exit.price;
+        pos.exitIndex = i;
+        pos.exitReason = exit.reason;
+        pos.exitPrice = exit.price;
         markers.push({
           strategyId,
           barIndex: i,
@@ -389,10 +480,43 @@ export function runStrategyScript(bars: OhlcvBar[], source: string, strategyId =
           kind: "exit",
           win: exit.reason === "target",
           price: exit.price,
-          side: open.side,
+          side: pos.side,
         });
-        trades.push(open);
+        trades.push(pos);
         open = null;
+      }
+      continue;
+    }
+
+    if (pending !== null) {
+      const fill = resolveEntryLimitFill(bar, pending.side, pending.limit, pending.stop);
+      if (fill !== null) {
+        const pos = makeOpen(i, fill, pending);
+        pending = null;
+        const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
+        if (exit) {
+          pos.exitIndex = i;
+          pos.exitReason = exit.reason;
+          pos.exitPrice = exit.price;
+          markers.push({
+            strategyId,
+            barIndex: i,
+            visibleFromIndex: i,
+            kind: "exit",
+            win: exit.reason === "target",
+            price: exit.price,
+            side: pos.side,
+          });
+          trades.push(pos);
+          open = null;
+        } else {
+          open = pos;
+        }
+        continue;
+      }
+      pending.barsWaited += 1;
+      if (pending.barsWaited >= expiryBars) {
+        pending = null;
       }
       continue;
     }
@@ -406,8 +530,8 @@ export function runStrategyScript(bars: OhlcvBar[], source: string, strategyId =
     }
     const signal = readSignal(result);
     if (!signal) continue;
-    const entry = bar.c;
-    const risk = Math.max(Math.abs(entry - signal.stop), 0.25);
+    const limit = bar.c;
+    const risk = Math.max(Math.abs(limit - signal.stop), 0.25);
     markers.push({
       strategyId,
       barIndex: i,
@@ -417,27 +541,24 @@ export function runStrategyScript(bars: OhlcvBar[], source: string, strategyId =
       price: null,
       side: signal.side,
     });
-    markers.push({
-      strategyId,
-      barIndex: i,
-      visibleFromIndex: i,
-      kind: "entry",
-      win: null,
-      price: entry,
+    if (instantFill) {
+      open = makeOpen(i, limit, {
+        side: signal.side,
+        stop: signal.stop,
+        target: signal.target,
+        risk,
+        signalIndex: i,
+      });
+      continue;
+    }
+    pending = {
       side: signal.side,
-    });
-    open = {
-      strategyId,
-      side: signal.side,
+      stop: signal.stop,
+      target: signal.target,
+      risk,
+      limit,
       signalIndex: i,
-      entryIndex: i,
-      exitIndex: null,
-      entryPrice: entry,
-      stopPrice: signal.stop,
-      targetPrice: signal.target,
-      exitPrice: null,
-      exitReason: null,
-      riskPoints: risk,
+      barsWaited: 0,
     };
   }
 

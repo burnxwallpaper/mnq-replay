@@ -14,6 +14,7 @@ Safety:
   - Refuses live-looking ports 4001 / 7496 unless allowLive / --allow-live
   - --dry-run (default): log signals, no orders
   - --place-orders: submit Paper limit + bracket (still refuses live ports)
+  - Unfilled entry limit expires after ENTRY_LIMIT_EXPIRY_BARS completed 1m bars (default 2)
   - maxContracts defaults to 1
 
 Usage (Windows, Gateway Paper open on 4002):
@@ -36,6 +37,8 @@ from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 LIVE_PORTS = {7496, 4001}
+# Unfilled entry Limit: cancel after this many *completed* 1m bars after the signal bar.
+ENTRY_LIMIT_EXPIRY_BARS = 2
 PAPER_DIR = Path(__file__).resolve().parent
 STATE_PATH = PAPER_DIR / "state.json"
 TRADES_PATH = PAPER_DIR / "trades.jsonl"
@@ -91,6 +94,7 @@ class Config:
     warmupBars: int = 400
     limitOffsetTicks: float = 0.0  # 0 = limit at bar close; MNQ tick=0.25
     rewardMultiple: float = 2.5  # initial TP in R; EMA may tighten to 1R
+    entryLimitExpiryBars: int = 2  # cancel unfilled entry after N completed 1m bars
 
 
 def load_config() -> Config:
@@ -126,6 +130,7 @@ def load_config() -> Config:
         warmupBars=max(50, int(raw.get("warmupBars", 400))),
         limitOffsetTicks=float(raw.get("limitOffsetTicks", 0)),
         rewardMultiple=float(raw.get("rewardMultiple", 2.5)),
+        entryLimitExpiryBars=max(1, int(raw.get("entryLimitExpiryBars", ENTRY_LIMIT_EXPIRY_BARS))),
     )
 
 
@@ -153,6 +158,8 @@ class OpenTrade:
     sl_order_id: Optional[int] = None
     tightened: bool = False
     entry_filled: bool = False
+    signal_bar_ts: int = 0  # completed bar that generated the signal
+    bars_waited: int = 0  # completed bars after signal while still unfilled
 
 
 @dataclass
@@ -190,6 +197,8 @@ def load_state(cfg: Config) -> RuntimeState:
             sl_order_id=open_raw.get("sl_order_id"),
             tightened=bool(open_raw.get("tightened", False)),
             entry_filled=bool(open_raw.get("entry_filled", False)),
+            signal_bar_ts=int(open_raw.get("signal_bar_ts", 0) or 0),
+            bars_waited=int(open_raw.get("bars_waited", 0) or 0),
         )
     return RuntimeState(
         equity=float(raw.get("equity", cfg.startingEquity)),
@@ -608,12 +617,45 @@ class PaperLoop:
     def _heartbeat_eval(self, index: int, source: str, allow_order: bool) -> None:
         bar = self.bars[index]
         ct = datetime.fromtimestamp(bar.ts / 1000, tz=CHICAGO)
+
+        # Sync open position with IB if we think we are in a trade
+        if self.state.open and self.place_orders:
+            self._sync_position_from_ib()
+
+        # Unfilled entry limit expiry: count completed bars after the signal bar.
+        if self.state.open and not self.state.open.entry_filled:
+            waited = self._bars_since_signal(index)
+            self.state.open.bars_waited = waited
+            expiry = self.cfg.entryLimitExpiryBars
+            pos = f"pending-{self.state.open.side}@{self.state.open.entry} waited={waited}/{expiry}"
+            Log.info(
+                "BAR %s %s O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f session=%s pos=%s",
+                source,
+                ct.strftime("%Y-%m-%d %H:%M %Z"),
+                bar.o,
+                bar.h,
+                bar.l,
+                bar.c,
+                bar.v,
+                session_ok(bar.ts),
+                pos,
+            )
+            if waited >= expiry:
+                self._cancel_unfilled_entry(
+                    f"entry limit expired after {waited} completed 1m bar(s) "
+                    f"(limit={expiry}; signal_bar_ts={self.state.open.signal_bar_ts})"
+                )
+                save_state(self.state)
+            return
+
+        # Pass open only when filled so EMA tighten does not run on a resting entry.
+        open_for_eval = self.state.open if (self.state.open and self.state.open.entry_filled) else None
         result = evaluate_bar(
             self.bars,
             index,
             self.cfg.filters,
             self.cfg.side,
-            self.state.open,
+            open_for_eval,
             self.cfg.rewardMultiple,
         )
         pos = "flat" if self.state.open is None else f"{self.state.open.side}@{self.state.open.entry}"
@@ -630,11 +672,7 @@ class PaperLoop:
             pos,
         )
 
-        # Sync open position with IB if we think we are in a trade
-        if self.state.open and self.place_orders:
-            self._sync_position_from_ib()
-
-        if result.tighten_target is not None and self.state.open:
+        if result.tighten_target is not None and self.state.open and self.state.open.entry_filled:
             new_tp = round_to_tick(result.tighten_target, self._tick)
             Log.info(
                 "TIGHTEN %s target %.2f -> %.2f (1R)",
@@ -667,7 +705,7 @@ class PaperLoop:
         if self.state.open is not None:
             Log.info("Already in position — skip new signal")
             return
-        self._place_bracket(sig)
+        self._place_bracket(sig, signal_bar_ts=bar.ts)
 
     def _ib_position_qty(self) -> float:
         assert self.ib and self.contract
@@ -737,7 +775,7 @@ class PaperLoop:
         )
         self.state.open = None
 
-    def _place_bracket(self, sig: Signal) -> None:
+    def _place_bracket(self, sig: Signal, signal_bar_ts: int) -> None:
         from ib_insync import LimitOrder, StopOrder  # type: ignore
 
         assert self.ib and self.contract
@@ -776,7 +814,8 @@ class PaperLoop:
         sl.ocaType = 1
 
         Log.info(
-            "PLACE bracket %s qty=%s lmt=%.2f tp=%.2f sl=%.2f ids=%s/%s/%s",
+            "PLACE bracket %s qty=%s lmt=%.2f tp=%.2f sl=%.2f ids=%s/%s/%s "
+            "entry_expiry_bars=%s signal_bar_ts=%s",
             action,
             qty,
             entry,
@@ -785,6 +824,8 @@ class PaperLoop:
             parent.orderId,
             tp.orderId,
             sl.orderId,
+            self.cfg.entryLimitExpiryBars,
+            signal_bar_ts,
         )
         for order in (parent, tp, sl):
             self.ib.placeOrder(self.contract, order)
@@ -802,8 +843,49 @@ class PaperLoop:
             sl_order_id=sl.orderId,
             tightened=False,
             entry_filled=False,
+            signal_bar_ts=int(signal_bar_ts),
+            bars_waited=0,
         )
         save_state(self.state)
+
+    def _bars_since_signal(self, index: int) -> int:
+        """How many completed bars after signal_bar_ts, up to bars[index]."""
+        ot = self.state.open
+        if not ot or not ot.signal_bar_ts:
+            return int(ot.bars_waited) if ot else 0
+        n = 0
+        for b in self.bars[: index + 1]:
+            if b.ts > ot.signal_bar_ts:
+                n += 1
+        return n
+
+    def _cancel_unfilled_entry(self, reason: str) -> None:
+        """Cancel resting parent entry (+ inactive children). Do not touch filled positions."""
+        ot = self.state.open
+        if not ot or ot.entry_filled:
+            return
+        Log.warning(
+            "EXPIRE unfilled entry %s lmt=%.2f parent=%s — %s",
+            ot.side,
+            ot.entry,
+            ot.parent_order_id,
+            reason,
+        )
+        if self.ib and self.place_orders:
+            cancel_ids = {
+                i
+                for i in (ot.parent_order_id, ot.tp_order_id, ot.sl_order_id)
+                if i is not None
+            }
+            for trade in list(self.ib.openTrades()):
+                oid = trade.order.orderId
+                if oid in cancel_ids:
+                    try:
+                        self.ib.cancelOrder(trade.order)
+                        Log.info("Cancelled orderId=%s status=%s", oid, trade.orderStatus.status)
+                    except Exception:  # noqa: BLE001
+                        Log.exception("cancelOrder failed for %s", oid)
+        self.state.open = None
 
     def _modify_take_profit(self, new_tp: float) -> None:
         assert self.ib and self.contract and self.state.open

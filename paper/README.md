@@ -41,7 +41,7 @@ py -3 ib_paper_loop.py --dry-run --max-bars 2
 | 模式 | 指令 | 行為 |
 |------|------|------|
 | **Dry-run（預設）** | `py -3 ib_paper_loop.py --dry-run` | 連 Paper、收 1m、印訊號／收窄；**唔下單**（readonly） |
-| **Paper 下單** | `py -3 ib_paper_loop.py --place-orders` | 訊號時掛 **Limit@收市價**＋TP／SL bracket；`maxContracts` 預設 **1** |
+| **Paper 下單** | `py -3 ib_paper_loop.py --place-orders` | 訊號時掛 **Limit@收市價**＋TP／SL bracket；`maxContracts` 預設 **1**；**未成交入場限價喺訊號後 2 根完結 1m bar 自動撤**（`entryLimitExpiryBars`，預設 2） |
 
 `config.json` 入面 `placeOrders: false` 係預設；即使改成 true，都建議第一次用 CLI `--dry-run` 確認 bar／訊號先。
 
@@ -57,6 +57,7 @@ py -3 ib_paper_loop.py --dry-run --max-bars 2
 - Filters：`0.45 / 2 / 15 / 1.2`  
 - Session：`America/Chicago` **09:00–20:29** 先開新倉（session close 21:00；收市前 30 分鐘唔再開新倉）；**星期五 CT 14:45 起唔再開新倉**；已開倉照常管理／平倉  
 - Long 陽燭 impulse／Short 陰燭 impulse；目標 **2.5R**；收市穿 5 EMA 收窄到 **1R**（改 TP）  
+- 入場：**Limit@訊號收市**；訊號後 **2 根完結 1m bar** 仍未成交 → 取消 parent（未啟動嘅 TP／SL 一齊撤）；成交後止蝕／止賺 GTC 照留  
 - 會計用來回費 **$1.6**（只記帳；IB Paper 另有模擬費用）  
 - 合約：**MNQ · CME** front month（唔係 GLOBEX）
 
@@ -99,5 +100,5 @@ py -3 paper/ib_paper_stub.py
 
 - **Loop:** `py -3 paper/ib_paper_loop.py --dry-run` then `--place-orders` on Paper (port **4002**).  
 - **Bars:** 1m via historical `keepUpToDate` (not 5s realtime bars).  
-- **Orders:** limit at bar close + bracket stop/target; EMA tighten modifies TP to 1R.  
+- **Orders:** limit at bar close + bracket stop/target; unfilled entry cancels after **2** completed 1m bars; EMA tighten modifies TP to 1R after fill.  
 - **Safety:** refuses 4001/7496; Ctrl+C stops the loop — cancel resting orders in Gateway if needed.

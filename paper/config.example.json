@@ -21,5 +21,6 @@
   "placeOrders": false,
   "warmupBars": 400,
   "limitOffsetTicks": 0,
-  "rewardMultiple": 2.5
+  "rewardMultiple": 2.5,
+  "entryLimitExpiryBars": 2
 }
