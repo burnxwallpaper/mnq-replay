@@ -20,5 +20,6 @@
   "side": "both",
   "placeOrders": false,
   "warmupBars": 400,
-  "limitOffsetTicks": 0
+  "limitOffsetTicks": 0,
+  "rewardMultiple": 2.5
 }

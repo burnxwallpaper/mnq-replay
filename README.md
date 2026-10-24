@@ -43,7 +43,7 @@ The workflow sets that from the repository name. A hand build for a project site
 
 Space plays and pauses. The range input scrubs the cursor. Bars after the cursor stay hidden, and strategy markers appear only once the cursor reaches them. The side panel shows total R and dollar PnL for enabled strategies, including an open trade marked at the cursor close.
 
-Strategies are JSON files in `strategies/`, checked against `strategies/schema.json`. `impulse_pullback_long` buys a limit at the signal close after a low-volume red pullback holds the upper half of a large full-body impulse, with the stop at the signal low and the target at 2R. Volume and body thresholds are in that file (volume about 2.5× recent bars). `Node.js 22` is required for the optional SQLite scripts (`NODE_OPTIONS=--experimental-sqlite` is set by npm).
+Strategies are JSON files in `strategies/`, checked against `strategies/schema.json`. `impulse_pullback_long` buys a limit at the signal close after a low-volume red pullback holds the upper half of a large full-body impulse, with the stop at the signal low and the target at 2.5R. Volume and body thresholds are in that file (volume about 2.5× recent bars). `Node.js 22` is required for the optional SQLite scripts (`NODE_OPTIONS=--experimental-sqlite` is set by npm).
 
 ## Later
 

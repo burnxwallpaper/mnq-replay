@@ -90,6 +90,7 @@ class Config:
     placeOrders: bool = False
     warmupBars: int = 400
     limitOffsetTicks: float = 0.0  # 0 = limit at bar close; MNQ tick=0.25
+    rewardMultiple: float = 2.5  # initial TP in R; EMA may tighten to 1R
 
 
 def load_config() -> Config:
@@ -124,6 +125,7 @@ def load_config() -> Config:
         placeOrders=bool(raw.get("placeOrders", False)),
         warmupBars=max(50, int(raw.get("warmupBars", 400))),
         limitOffsetTicks=float(raw.get("limitOffsetTicks", 0)),
+        rewardMultiple=float(raw.get("rewardMultiple", 2.5)),
     )
 
 
@@ -310,6 +312,7 @@ def evaluate_bar(
     filters: Filters,
     side_mode: str,
     open_trade: Optional[OpenTrade],
+    reward_multiple: float = 2.5,
 ) -> EvalResult:
     bar = bars[index]
     closes = [b.c for b in bars]
@@ -350,7 +353,7 @@ def evaluate_bar(
             signal=Signal(
                 side="long",
                 stop=bar.l,
-                target=bar.c + risk * 2,
+                target=bar.c + risk * reward_multiple,
                 risk=risk,
                 entry=bar.c,
             )
@@ -361,7 +364,7 @@ def evaluate_bar(
             signal=Signal(
                 side="short",
                 stop=bar.h,
-                target=bar.c - risk * 2,
+                target=bar.c - risk * reward_multiple,
                 risk=risk,
                 entry=bar.c,
             )
@@ -611,6 +614,7 @@ class PaperLoop:
             self.cfg.filters,
             self.cfg.side,
             self.state.open,
+            self.cfg.rewardMultiple,
         )
         pos = "flat" if self.state.open is None else f"{self.state.open.side}@{self.state.open.entry}"
         Log.info(

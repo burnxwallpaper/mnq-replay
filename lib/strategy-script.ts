@@ -97,7 +97,7 @@ export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FI
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
 // Entry fills at the signal close. One position at a time.
-// Impulse entries still target 2R. A close below the 5 EMA tightens that to 1R.
+// Impulse entries still target 2.5R. A close below the 5 EMA tightens that to 1R.
 // New longs only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
@@ -116,7 +116,7 @@ const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
 if (!position && sessionOk && bar.c > bar.o && body / span >= ${f.bodyRatio} && body >= ${f.minBody} && bar.v > avgVol * ${f.volMult}) {
   const risk = Math.max(bar.c - bar.l, 1)
-  return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * 2 }
+  return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * 2.5 }
 }
 return null
 `;
@@ -131,7 +131,7 @@ export function buildShortStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_F
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
 // Entry fills at the signal close. One position at a time.
-// Impulse entries still target 2R. A close above the 5 EMA tightens that to 1R.
+// Impulse entries still target 2.5R. A close above the 5 EMA tightens that to 1R.
 // New shorts only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
@@ -150,7 +150,7 @@ const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
 if (!position && sessionOk && bar.c < bar.o && body / span >= ${f.bodyRatio} && body >= ${f.minBody} && bar.v > avgVol * ${f.volMult}) {
   const risk = Math.max(bar.h - bar.c, 1)
-  return { signal: true, side: "short", stop: bar.h, target: bar.c - risk * 2 }
+  return { signal: true, side: "short", stop: bar.h, target: bar.c - risk * 2.5 }
 }
 return null
 `;
@@ -163,18 +163,18 @@ export function isStaleDefaultScript(script: string) {
   if (script === LEGACY_DEFAULT_STRATEGY_SCRIPT || script === EMA_EXIT_DEFAULT_STRATEGY_SCRIPT) {
     return true;
   }
+  // Pre-2.5R defaults (including prior session cutoffs): still say target 2R.
+  if (script.includes("Impulse entries still target 2R")) {
+    return true;
+  }
   // Pre-cutoff defaults used hour-only Chicago 09–21; upgrade to 09:00–20:29 entry window.
-  if (
-    script.includes("const sessionOk = ct >= 9 && ct <= 21") &&
-    script.includes("Impulse entries still target 2R")
-  ) {
+  if (script.includes("const sessionOk = ct >= 9 && ct <= 21")) {
     return true;
   }
   // Pre-Friday cutoff: had 09:00–20:29 window but no Fri 14:45 CT block.
   return (
     script.includes("ctMins >= 9 * 60 && ctMins < 21 * 60 - 30") &&
-    !script.includes("FRIDAY_ENTRY_CUTOFF") &&
-    script.includes("Impulse entries still target 2R")
+    !script.includes("FRIDAY_ENTRY_CUTOFF")
   );
 }
 

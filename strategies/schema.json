@@ -82,7 +82,7 @@
         "rewardMultiple": {
           "type": "number",
           "exclusiveMinimum": 0,
-          "description": "Take-profit distance in R. R is signal close minus signal low. 2 places the target at entry + 2R."
+          "description": "Take-profit distance in R. R is signal close minus signal low. 2.5 places the target at entry + 2.5R (site default)."
         },
         "limitExpiryBars": {
           "type": "integer",

@@ -8,11 +8,11 @@
 // max drawdown $22 is 13 Sep 2026 22:00 UTC through 9 Oct 2026 09:30 UTC.
 // Reset the strategy properties to the defaults below if the report was edited.
 //
-// Entry fills at the signal close. Stop is that bar's low. Target starts at 2R.
-// R for the 2R target is max(close - low, 1). The 1R latch uses max(close - low, 0.25).
+// Entry fills at the signal close. Stop is that bar's low. Target starts at 2.5R.
+// R for the 2.5R target is max(close - low, 1). The 1R latch uses max(close - low, 0.25).
 // A close under the 5 EMA moves the target to 1R and leaves it there. Stop and the
 // current target are tested before that move. If both are touched, the stop fills.
-// A bar that reaches 2R exits at 2R. Quantity is sized so each R is $2.
+// A bar that reaches 2.5R exits at 2.5R. Quantity is sized so each R is $2.
 strategy("MNQ Impulse 5EMA Session",
      shorttitle="MNQ 5EMA",
      overlay=true,
@@ -43,6 +43,7 @@ entryCutoffMin = input.int(30, "No new entries N min before close", minval=0, ma
 fridayCutoffHour = input.int(14, "Friday last-entry hour (CT)", minval=0, maxval=23)
 fridayCutoffMinute = input.int(45, "Friday last-entry minute (CT)", minval=0, maxval=59)
 dollarsPerR = input.float(2.0, "Dollars per R", minval=0.01, step=0.5)
+rewardMultiple = input.float(2.5, "Take-profit R", minval=0.25, step=0.25)
 
 emaSeed(src, len) =>
     float e = na
@@ -118,7 +119,7 @@ if flatNow and sessionOk and impulse
     float targetDist = math.max(close - low, 1.0)
     entryPx := close
     stopPx := low
-    targetPx := close + targetDist * 2.0
+    targetPx := close + targetDist * rewardMultiple
     riskPts := math.max(close - low, 0.25)
     inPos := true
     entered := true

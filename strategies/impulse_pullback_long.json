@@ -12,7 +12,7 @@
     "maxPullbackVolumeMultiple": 0.8,
     "minClosePositionInSignalRange": 0.5,
     "maxPullbackBars": 1,
-    "rewardMultiple": 2,
+    "rewardMultiple": 2.5,
     "limitExpiryBars": 15,
     "pointValue": 2,
     "quantity": 1
