@@ -1,0 +1,54 @@
+//@version=5
+// Entry-only indicator matching mnq-replay DEFAULT_STRATEGY_SCRIPT /
+// DEFAULT_SHORT_STRATEGY_SCRIPT (impulse + volume + Chicago 09:00–20:29 entry window).
+// Chart: CME_MINI:MNQ1! (or MNQ continuous) on 1-minute.
+indicator("MNQ Impulse Entry Signals", shorttitle="MNQ Entry", overlay=true, max_labels_count=500)
+
+enableLong  = input.bool(true,  "Enable Long entries",  group="Sides")
+enableShort = input.bool(true,  "Enable Short entries", group="Sides")
+
+volLength     = input.int(20,   "Volume average length", minval=1, group="Entry")
+volMultiple   = input.float(1.8,"Volume multiple", minval=0.1, step=0.1, group="Entry")
+bodySpanMin   = input.float(0.55,"Min body/span", minval=0.0, maxval=1.0, step=0.05, group="Entry")
+minBody       = input.float(4.0, "Min body (points)", minval=0.0, step=0.25, group="Entry")
+sessionStartHour = input.int(9,  "Session start hour (CT)", minval=0, maxval=23, group="Session")
+sessionEndHour   = input.int(21, "Session close hour (CT)", minval=0, maxval=23, group="Session")
+entryCutoffMin   = input.int(30, "No new entries N min before close", minval=0, maxval=180, group="Session")
+showEma       = input.bool(false, "Show EMA 5 (visual only)", group="Display")
+emaLength     = input.int(5, "EMA length", minval=1, group="Display")
+
+int ctHour = hour(time, "America/Chicago")
+int ctMinute = minute(time, "America/Chicago")
+int ctMins = ctHour * 60 + ctMinute
+bool sessionOk = ctMins >= sessionStartHour * 60 and ctMins < sessionEndHour * 60 - entryCutoffMin
+
+float avgVol = ta.sma(volume, volLength)
+float body = math.abs(close - open)
+float span = math.max(high - low, 0.25)
+
+bool longImpulse =
+     close > open and
+     body / span >= bodySpanMin and
+     body >= minBody and
+     volume > avgVol * volMultiple
+
+bool shortImpulse =
+     close < open and
+     body / span >= bodySpanMin and
+     body >= minBody and
+     volume > avgVol * volMultiple
+
+// Site fires on confirmed bar close (entry at that close).
+bool longSignal  = enableLong  and sessionOk and longImpulse  and barstate.isconfirmed
+bool shortSignal = enableShort and sessionOk and shortImpulse and barstate.isconfirmed
+
+plotshape(longSignal,  title="Long entry",  style=shape.triangleup,   location=location.belowbar, color=#3dd68c, size=size.small, text="L")
+plotshape(shortSignal, title="Short entry", style=shape.triangledown, location=location.abovebar, color=#5b8def, size=size.small, text="S")
+
+bgcolor(sessionOk ? na : color.new(#ef6b73, 92), title="Outside Chicago session")
+
+float ema5 = ta.ema(close, emaLength)
+plot(showEma ? ema5 : na, "EMA 5", color=#39d0ff, linewidth=2)
+
+alertcondition(longSignal,  title="MNQ Long entry",  message="MNQ impulse LONG entry")
+alertcondition(shortSignal, title="MNQ Short entry", message="MNQ impulse SHORT entry")

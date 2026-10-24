@@ -37,7 +37,7 @@ function main() {
   console.log("  2. Prefer Python smoke test:  python paper/ib_paper_stub.py");
   console.log("     (pip install ib_insync). It qualifies MNQ and prints account + contract.");
   console.log("  3. Next step (not in this scaffold): 1m bar loop → signal → bracket orders");
-  console.log("     matching session America/Chicago 09–21, 2R / 1R EMA tighten, fee tracking.");
+  console.log("     matching session America/Chicago 09:00–20:29 (no new entries last 30m before 21:00 close), 2R / 1R EMA tighten, fee tracking.");
   console.log("");
   console.log("Refusing to auto-install @stoqey/ib here — add it yourself when ready.");
   console.log("NEVER point this at live port 7496 until you explicitly set allowLive: true.");
