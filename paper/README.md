@@ -55,7 +55,7 @@ py -3 ib_paper_loop.py --dry-run --max-bars 2
 ### 策略對齊（同網頁 Combined 預設）
 
 - Filters：`0.45 / 2 / 15 / 1.2`  
-- Session：`America/Chicago` **09:00–20:29** 先開新倉（session close 21:00；收市前 30 分鐘唔再開新倉；已開倉照常管理／平倉）  
+- Session：`America/Chicago` **09:00–20:29** 先開新倉（session close 21:00；收市前 30 分鐘唔再開新倉）；**星期五 CT 14:45 起唔再開新倉**；已開倉照常管理／平倉  
 - Long 陽燭 impulse／Short 陰燭 impulse；目標 **2R**；收市穿 5 EMA 收窄到 **1R**（改 TP）  
 - 會計用來回費 **$1.6**（只記帳；IB Paper 另有模擬費用）  
 - 合約：**MNQ · CME** front month（唔係 GLOBEX）

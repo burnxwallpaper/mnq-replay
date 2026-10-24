@@ -1,7 +1,7 @@
 /**
  * One-off grid search: EntryFilters → Combined peakEquity (hist high).
  * Uses production buildLong/Short + runStrategyScript + summarizeMultiBacktest.
- * Session Intl is precomputed once (Chicago 09:00–20:29 entry window) for speed; metrics match production.
+ * Session Intl is precomputed once (Chicago 09:00–20:29 + Fri no entries from 14:45 CT) for speed; metrics match production.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -53,6 +53,7 @@ const bars = raw.map((b) => ({
 
 const fmtParts = new Intl.DateTimeFormat("en-GB", {
   timeZone: "America/Chicago",
+  weekday: "short",
   hour: "2-digit",
   minute: "2-digit",
   hourCycle: "h23",
@@ -62,12 +63,13 @@ const fmtParts = new Intl.DateTimeFormat("en-GB", {
   const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
   const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
   const mins = h * 60 + m;
-  return mins >= 9 * 60 && mins < 21 * 60 - 30;
+  const wd = parts.find((p) => p.type === "weekday")?.value ?? "";
+  return mins >= 9 * 60 && mins < 21 * 60 - 30 && !(wd === "Fri" && mins >= 14 * 60 + 45);
 });
 
 function patchSession(src: string): string {
   const next = src.replace(
-    /\/\/ SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT\nconst ctParts = new Intl\.DateTimeFormat\("en-GB", \{ timeZone: "America\/Chicago", hour: "2-digit", minute: "2-digit", hourCycle: "h23" \}\)\.formatToParts\(new Date\(bar\.ts\)\)\nconst ctMins = Number\(ctParts\.find\(\(p\) => p\.type === "hour"\)\?\.value \?\? 0\) \* 60 \+ Number\(ctParts\.find\(\(p\) => p\.type === "minute"\)\?\.value \?\? 0\)\nconst sessionOk = ctMins >= 9 \* 60 && ctMins < 21 \* 60 - 30\n/,
+    /\/\/ SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT \(no new entries Fri >= 14:45\)\nconst ctParts = new Intl\.DateTimeFormat\("en-GB", \{ timeZone: "America\/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" \}\)\.formatToParts\(new Date\(bar\.ts\)\)\nconst ctMins = Number\(ctParts\.find\(\(p\) => p\.type === "hour"\)\?\.value \?\? 0\) \* 60 \+ Number\(ctParts\.find\(\(p\) => p\.type === "minute"\)\?\.value \?\? 0\)\nconst ctWd = ctParts\.find\(\(p\) => p\.type === "weekday"\)\?\.value \?\? ""\nconst sessionOk = ctMins >= 9 \* 60 && ctMins < 21 \* 60 - 30 && !\(ctWd === "Fri" && ctMins >= 14 \* 60 \+ 45\)\n/,
     "const sessionOk = globalThis.__SESSION[i]\n",
   );
   if (next === src) {
@@ -277,7 +279,7 @@ const payload = {
   best,
   top10,
   ranked: results,
-  note: "Optimized Combined peakEquity (hist high) for Long+Short via summarizeMultiBacktest. Session filter uses precomputed Chicago 09:00–20:29 entry window identical to production Intl rule.",
+  note: "Optimized Combined peakEquity (hist high) for Long+Short via summarizeMultiBacktest. Session filter uses precomputed Chicago 09:00–20:29 + Fri>=14:45 block identical to production Intl rule.",
 };
 
 writeFileSync(outPath, JSON.stringify(payload, null, 2));

@@ -254,9 +254,11 @@ def ema_series(values: list[float], length: int) -> list[Optional[float]]:
 
 # Session for NEW entries only (open trades still manage/exit anytime).
 # SESSION_START=09:00 CT, SESSION_END=21:00 CT, no new entries in last 30 min → before 20:30 CT.
+# Friday: no new entries from 14:45 CT onward (FRIDAY_ENTRY_CUTOFF=14:45).
 SESSION_START_HOUR = 9
 SESSION_END_HOUR = 21
 ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE = 30
+FRIDAY_ENTRY_CUTOFF_MINUTES = 14 * 60 + 45  # 14:45 CT
 
 
 def chicago_hour(ts_ms: int) -> int:
@@ -270,11 +272,16 @@ def chicago_hm(ts_ms: int) -> tuple[int, int]:
 
 
 def session_ok(ts_ms: int) -> bool:
-    h, m = chicago_hm(ts_ms)
-    mins = h * 60 + m
+    dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC).astimezone(CHICAGO)
+    mins = dt.hour * 60 + dt.minute
     start = SESSION_START_HOUR * 60
     last_entry = SESSION_END_HOUR * 60 - ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE
-    return start <= mins < last_entry
+    if not (start <= mins < last_entry):
+        return False
+    # Monday=0 … Friday=4
+    if dt.weekday() == 4 and mins >= FRIDAY_ENTRY_CUTOFF_MINUTES:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

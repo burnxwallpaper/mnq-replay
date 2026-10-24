@@ -1,6 +1,6 @@
 //@version=5
 // Entry-only indicator matching mnq-replay DEFAULT_STRATEGY_SCRIPT /
-// DEFAULT_SHORT_STRATEGY_SCRIPT (impulse + volume + Chicago 09:00–20:29 entry window).
+// DEFAULT_SHORT_STRATEGY_SCRIPT (impulse + volume + Chicago 09:00–20:29 entry window; Fri no entries from 14:45 CT).
 // Chart: CME_MINI:MNQ1! (or MNQ continuous) on 1-minute.
 indicator("MNQ Impulse Entry Signals", shorttitle="MNQ Entry", overlay=true, max_labels_count=500)
 
@@ -14,13 +14,17 @@ minBody       = input.float(4.0, "Min body (points)", minval=0.0, step=0.25, gro
 sessionStartHour = input.int(9,  "Session start hour (CT)", minval=0, maxval=23, group="Session")
 sessionEndHour   = input.int(21, "Session close hour (CT)", minval=0, maxval=23, group="Session")
 entryCutoffMin   = input.int(30, "No new entries N min before close", minval=0, maxval=180, group="Session")
+fridayCutoffHour = input.int(14, "Friday last-entry hour (CT)", minval=0, maxval=23, group="Session")
+fridayCutoffMinute = input.int(45, "Friday last-entry minute (CT)", minval=0, maxval=59, group="Session")
 showEma       = input.bool(false, "Show EMA 5 (visual only)", group="Display")
 emaLength     = input.int(5, "EMA length", minval=1, group="Display")
 
 int ctHour = hour(time, "America/Chicago")
 int ctMinute = minute(time, "America/Chicago")
 int ctMins = ctHour * 60 + ctMinute
-bool sessionOk = ctMins >= sessionStartHour * 60 and ctMins < sessionEndHour * 60 - entryCutoffMin
+bool isFriday = dayofweek(time, "America/Chicago") == dayofweek.friday
+bool friBlocked = isFriday and ctMins >= fridayCutoffHour * 60 + fridayCutoffMinute
+bool sessionOk = ctMins >= sessionStartHour * 60 and ctMins < sessionEndHour * 60 - entryCutoffMin and not friBlocked
 
 float avgVol = ta.sma(volume, volLength)
 float body = math.abs(close - open)

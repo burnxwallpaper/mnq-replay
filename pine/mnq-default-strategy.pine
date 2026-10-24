@@ -2,7 +2,8 @@
 // Exact port of DEFAULT_STRATEGY_SCRIPT in lib/strategy-script.ts.
 //
 // Chart: CME_MINI:MNQ1! 1-minute, electronic session (the overnight bars must be
-// on the chart). New entries only 09:00–20:29 Chicago (close 21:00; last 30 min blocked).
+// on the chart). New entries only 09:00–20:29 Chicago (close 21:00; last 30 min blocked);
+// Friday: no new entries from 14:45 CT onward.
 // The window for 187 trades, 51.3% wins, +42.00R, +$84, max consecutive losses 7,
 // max drawdown $22 is 13 Sep 2026 22:00 UTC through 9 Oct 2026 09:30 UTC.
 // Reset the strategy properties to the defaults below if the report was edited.
@@ -39,6 +40,8 @@ minBody = input.float(4.0, "Min body (points)", minval=0.0, step=0.25)
 sessionStartHour = input.int(9, "Session start hour (CT)", minval=0, maxval=23)
 sessionEndHour = input.int(21, "Session close hour (CT)", minval=0, maxval=23)
 entryCutoffMin = input.int(30, "No new entries N min before close", minval=0, maxval=180)
+fridayCutoffHour = input.int(14, "Friday last-entry hour (CT)", minval=0, maxval=23)
+fridayCutoffMinute = input.int(45, "Friday last-entry minute (CT)", minval=0, maxval=59)
 dollarsPerR = input.float(2.0, "Dollars per R", minval=0.01, step=0.5)
 
 emaSeed(src, len) =>
@@ -52,7 +55,9 @@ emaSeed(src, len) =>
 int ctHour = hour(time, "America/Chicago")
 int ctMinute = minute(time, "America/Chicago")
 int ctMins = ctHour * 60 + ctMinute
-bool sessionOk = ctMins >= sessionStartHour * 60 and ctMins < sessionEndHour * 60 - entryCutoffMin
+bool isFriday = dayofweek(time, "America/Chicago") == dayofweek.friday
+bool friBlocked = isFriday and ctMins >= fridayCutoffHour * 60 + fridayCutoffMinute
+bool sessionOk = ctMins >= sessionStartHour * 60 and ctMins < sessionEndHour * 60 - entryCutoffMin and not friBlocked
 float ema5 = emaSeed(close, emaLength)
 float avgVol = bar_index + 1 < volLength ? ta.cum(volume) / (bar_index + 1) : ta.sma(volume, volLength)
 float body = math.abs(close - open)
@@ -139,7 +144,7 @@ else if confirmed and not entered and inPos
 
 plot(ema5, "EMA 5 halo", color=#071018, linewidth=4)
 plot(ema5, "EMA 5", color=#39d0ff, linewidth=2)
-bgcolor(sessionOk ? na : color.new(#ef6b73, 92), title="Outside entry window (not 09:00–20:29 CT)")
+bgcolor(sessionOk ? na : color.new(#ef6b73, 92), title="Outside entry window (not 09:00–20:29 CT / Fri>=14:45)")
 
 if entered
     label.new(bar_index, entryPx, "Buy " + str.tostring(entryPx, format.mintick), style=label.style_label_up, color=#3dd68c, textcolor=#ffffff, size=size.small)

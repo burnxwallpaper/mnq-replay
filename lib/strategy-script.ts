@@ -98,7 +98,7 @@ export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FI
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
 // Entry fills at the signal close. One position at a time.
 // Impulse entries still target 2R. A close below the 5 EMA tightens that to 1R.
-// New longs only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min). Open trades still manage/exit.
+// New longs only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
 const ema5 = ta.ema(i, 5, "c")
@@ -106,10 +106,11 @@ if (position && position.side === "long" && bar.c < ema5) {
   return { target: position.entry + position.risk }
 }
 
-// SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT
-const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
+// SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
+const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
 const ctMins = Number(ctParts.find((p) => p.type === "hour")?.value ?? 0) * 60 + Number(ctParts.find((p) => p.type === "minute")?.value ?? 0)
-const sessionOk = ctMins >= 9 * 60 && ctMins < 21 * 60 - 30
+const ctWd = ctParts.find((p) => p.type === "weekday")?.value ?? ""
+const sessionOk = ctMins >= 9 * 60 && ctMins < 21 * 60 - 30 && !(ctWd === "Fri" && ctMins >= 14 * 60 + 45)
 const avgVol = ta.sma(i, ${f.volLen}, "v")
 const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
@@ -131,7 +132,7 @@ export function buildShortStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_F
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
 // Entry fills at the signal close. One position at a time.
 // Impulse entries still target 2R. A close above the 5 EMA tightens that to 1R.
-// New shorts only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min). Open trades still manage/exit.
+// New shorts only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
 const ema5 = ta.ema(i, 5, "c")
@@ -139,10 +140,11 @@ if (position && position.side === "short" && bar.c > ema5) {
   return { target: position.entry - position.risk }
 }
 
-// SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT
-const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
+// SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
+const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
 const ctMins = Number(ctParts.find((p) => p.type === "hour")?.value ?? 0) * 60 + Number(ctParts.find((p) => p.type === "minute")?.value ?? 0)
-const sessionOk = ctMins >= 9 * 60 && ctMins < 21 * 60 - 30
+const ctWd = ctParts.find((p) => p.type === "weekday")?.value ?? ""
+const sessionOk = ctMins >= 9 * 60 && ctMins < 21 * 60 - 30 && !(ctWd === "Fri" && ctMins >= 14 * 60 + 45)
 const avgVol = ta.sma(i, ${f.volLen}, "v")
 const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
@@ -162,8 +164,16 @@ export function isStaleDefaultScript(script: string) {
     return true;
   }
   // Pre-cutoff defaults used hour-only Chicago 09–21; upgrade to 09:00–20:29 entry window.
-  return (
+  if (
     script.includes("const sessionOk = ct >= 9 && ct <= 21") &&
+    script.includes("Impulse entries still target 2R")
+  ) {
+    return true;
+  }
+  // Pre-Friday cutoff: had 09:00–20:29 window but no Fri 14:45 CT block.
+  return (
+    script.includes("ctMins >= 9 * 60 && ctMins < 21 * 60 - 30") &&
+    !script.includes("FRIDAY_ENTRY_CUTOFF") &&
     script.includes("Impulse entries still target 2R")
   );
 }
