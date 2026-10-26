@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""EMA 1R take-profit modify must not revise the OCA group (IB error 10326)."""
+"""EMA 1R take-profit modify must not revise the OCA group or its type.
+
+IB 10326 rejects a group-name revision. IB 10327 rejects a type revision.
+ocaType 0 is the text "0" on the wire, so a price-only modify has to omit
+the type with ib_insync's UNSET integer. Either reject leaves the live
+target and OCA unchanged and must not be logged as Modified.
+"""
 from __future__ import annotations
 
 import sys
@@ -17,6 +23,18 @@ import ib_paper_loop as loop  # noqa: E402
 
 def _bar(ts: int, o: float, h: float, l: float, c: float, v: float = 10) -> loop.Bar:
     return loop.Bar(ts=ts, o=o, h=h, l=l, c=c, v=v)
+
+
+def _wire_field(value: object) -> str:
+    """Empty-field rule from ib_insync.client.Client.send (makeEmpty=True).
+
+    None and UNSET_INTEGER/UNSET_DOUBLE are omitted. Every other value,
+    including the integer 0 and the empty string, is written with str().
+    An empty string is therefore an empty field; integer 0 is the text "0".
+    """
+    if value is None or value == loop._OCA_TYPE_UNSET or value == sys.float_info.max:
+        return ""
+    return str(value)
 
 
 class _Contract:
@@ -212,6 +230,7 @@ class TakeProfitModifyTest(unittest.TestCase):
         self.assertIn("TIGHTEN long target 125.00 -> 110.00 (1R)", text)
         self.assertIn("Modified TP order 7 -> 110.00 (OCA omitted on modify; group mnq-6 kept)", text)
         self.assertNotIn("10326", text)
+        self.assertNotIn("10327", text)
         self.assertNotIn("TIGHTEN not applied", text)
 
         self.assertTrue(self.runner.state.open.tightened)
@@ -230,7 +249,11 @@ class TakeProfitModifyTest(unittest.TestCase):
         self.assertEqual(sent["orderId"], 7)
         self.assertEqual(sent["lmtPrice"], 110.0)
         self.assertEqual(sent["ocaGroup"], "")
-        self.assertEqual(sent["ocaType"], 0)
+        self.assertEqual(sent["ocaType"], loop._OCA_TYPE_UNSET)
+        self.assertNotEqual(sent["ocaType"], 0)
+        self.assertEqual(_wire_field(sent["ocaGroup"]), "")
+        self.assertEqual(_wire_field(sent["ocaType"]), "")
+        self.assertEqual(_wire_field(0), "0")
         self.assertTrue(sent["transmit"])
         self.assertEqual(sent["parentId"], 6)
         self.assertEqual(sent["action"], "SELL")
@@ -249,6 +272,7 @@ class TakeProfitModifyTest(unittest.TestCase):
     def test_ib_reject_leaves_target_and_oca_unchanged(self) -> None:
         cases = (
             (10326, "OCA group revision is not allowed"),
+            (10327, "OCA group type revision is not allowed"),
             (201, "Order rejected"),
         )
         for code, message in cases:
@@ -269,14 +293,18 @@ class TakeProfitModifyTest(unittest.TestCase):
                 self.assertEqual(self.gateway.cancelled, [])
                 self.assertEqual(self.gateway.submitted[-1]["orderId"], 7)
                 self.assertEqual(self.gateway.submitted[-1]["ocaGroup"], "")
-                self.assertEqual(self.gateway.submitted[-1]["ocaType"], 0)
+                self.assertEqual(self.gateway.submitted[-1]["ocaType"], loop._OCA_TYPE_UNSET)
                 self.assertEqual(self.gateway.submitted[-1]["lmtPrice"], 110.0)
+                self.assertEqual(self.gateway.submitted[-1]["live_lmt"], 125.0)
+                self.assertEqual(self.gateway.submitted[-1]["live_oca"], "mnq-6")
+                self.assertEqual(self.gateway.submitted[-1]["live_oca_type"], 1)
 
     def test_oca_warning_and_unrelated_reject_still_count_as_accepted(self) -> None:
         # 2109 means the price change was processed and the group was not revised.
         self.gateway.errors_on_sleep = [
             (7, 2109, "Attempted modify of OcaGroup will not be done. Order modify now being processed."),
             (99, 10326, "OCA group revision is not allowed"),
+            (99, 10327, "OCA group type revision is not allowed"),
         ]
         text = self._eval()
         self.assertIn("Modified TP order 7 -> 110.00", text)
@@ -304,6 +332,7 @@ class TakeProfitModifyTest(unittest.TestCase):
         self.assertEqual(self.gateway.slept, [])
         self.assertEqual(self.gateway.cancelled, [])
         self.assertEqual(self.gateway.submitted[0]["ocaGroup"], "")
+        self.assertEqual(self.gateway.submitted[0]["ocaType"], loop._OCA_TYPE_UNSET)
         self.assertFalse(self.gateway.submitted[0]["same_object"])
 
     def test_missing_tp_does_not_mark_tightened_or_cancel_the_stop(self) -> None:

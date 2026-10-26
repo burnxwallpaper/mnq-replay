@@ -18,10 +18,12 @@ Safety:
   - A working Paper entry stays tracked until the parent fills, the parent is cancelled,
     or that limit expires. An empty positions() snapshot is not a cancel (fills lag it).
   - maxContracts defaults to 1
-  - EMA tighten to 1R revises the working TP limit in place. The modify omits
-    ocaGroup/ocaType (IB error 10326 rejects an OCA revision and leaves the
-    old price). The stop stays in the original OCA group. target/tightened
-    update only after that modify is accepted.
+  - EMA tighten to 1R revises the working TP limit in place. The modify
+    sends an empty ocaGroup and omits ocaType. ocaType 0 is the text "0" on
+    the wire, an OCA type revision (IB 10327) that cancels the working TP.
+    10326 and 10327 are hard rejects: the live price and OCA stay put, and
+    the log does not say Modified. The stop stays in the original OCA group.
+    target/tightened update only after that modify is accepted.
   - Daytime flip lock (default 15): after a full stop, block opposite-side entries
     for the next 15 completed 1m bars. Same side stays allowed. 0 disables.
     Shared by long and short when side=both. Paper sockets only.
@@ -64,9 +66,14 @@ ENTRY_LIMIT_EXPIRY_BARS = 2
 # Dead parent, and only these. "Inactive" is left alone: a bracket can sit there
 # before the transmitting child, and a reject still dies on the entry-limit timer.
 _ENTRY_CANCEL_STATUSES = frozenset({"cancelled", "apicancelled"})
-# A modify that resends ocaGroup/ocaType is an OCA revision. These codes mean
-# IB did not apply the new limit. 2109 is not here: that warning means the
-# price change was processed and the existing OCA group was left alone.
+# ib_insync.util.UNSET_INTEGER. Client.send writes this as an empty field.
+# ocaType 0 is not empty: placeOrder writes the text "0", which revises a
+# live type-1 OCA order. Paper answers with 10327 and cancels that order.
+_OCA_TYPE_UNSET = 2**31 - 1
+# A modify that names an OCA group (10326) or sends an OCA type (10327) is
+# a revision. These codes mean IB did not apply the new limit. 2109 is not
+# here: that warning means the price change was processed and the existing
+# OCA group was left alone.
 _TP_MODIFY_REJECT_CODES = frozenset({
     103,
     104,
@@ -82,9 +89,10 @@ _TP_MODIFY_REJECT_CODES = frozenset({
     10147,
     10148,
     10326,
+    10327,
 })
-# Paper Gateway rejects 10326 within a few milliseconds. Wait long enough to
-# see that before recording the 1R target locally.
+# Paper Gateway rejects 10326/10327 within a few milliseconds. Wait long
+# enough to see that before recording the 1R target locally.
 _TP_MODIFY_ACK_SEC = 1.0
 
 
@@ -1650,11 +1658,14 @@ class PaperLoop:
     def _modify_take_profit(self, new_tp: float) -> bool:
         """Revise the working TP limit. True only if IB accepted the new price.
 
-        The live order stays in its OCA group. IB error 10326 rejects the
-        whole modify when the request still carries ocaGroup/ocaType, so the
-        outbound copy omits those fields. TWS keeps the group already on the
-        order, and the stop stays OCO with this limit. The stop is not
-        cancelled; a cancel/replace would have to rejoin that same group.
+        The live order stays in its OCA group. The outbound copy clears
+        ocaGroup to "" (already an empty wire field, so this is not a group
+        revision) and sets ocaType to UNSET_INTEGER so the type field is
+        omitted. Sending ocaType 0 is a type revision: IB error 10327 cancels
+        the working TP. 10326 and 10327 both mean the limit was not applied.
+        The working order's price and OCA are left unchanged and this returns
+        False, so the caller must not log Modified or set tightened. The stop
+        is not cancelled. Cancel/replace is not used; it would drop the OCO pair.
         """
         assert self.ib and self.contract and self.state.open
         tp_id = self.state.open.tp_order_id
@@ -1690,12 +1701,13 @@ class PaperLoop:
                 return
             rejects.append((code, str(args[2])))
 
-        # Copy so the working order keeps its OCA group if the send fails,
-        # and so placeOrder cannot revise that group. Same orderId → modify.
+        # Copy so a reject cannot rewrite the working order's price or OCA.
+        # Same orderId → modify. "" is an empty ocaGroup field. UNSET omits
+        # ocaType; 0 would be sent as "0" and revise type 1 (error 10327).
         outbound = copy(order)
         outbound.lmtPrice = float(new_tp)
         outbound.ocaGroup = ""
-        outbound.ocaType = 0
+        outbound.ocaType = _OCA_TYPE_UNSET
         outbound.transmit = True
 
         error_event = getattr(self.ib, "errorEvent", None)
