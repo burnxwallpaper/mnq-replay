@@ -5,8 +5,7 @@
  * and prints the next steps for a real Gateway loop.
  *
  * Optional later: connect with `@stoqey/ib` once IB Gateway is logged into Paper
- * on port 7497. Prefer the Python stub (`ib_paper_stub.py` + ib_insync) for a
- * quicker first connection test.
+ * on port 4002. Prefer the Python loop (`ib_paper_loop.py` + ib_insync).
  *
  * Usage: npx tsx paper/ib-paper-runner.ts
  */
@@ -31,16 +30,18 @@ function main() {
     `Filters: ${cfg.filters.bodyRatio}/${cfg.filters.minBody}/${cfg.filters.volLen}/${cfg.filters.volMult}`,
   );
   console.log(`Side: ${cfg.side} | maxContracts: ${cfg.maxContracts} (soft cap; live size TBD)`);
+  console.log(
+    `Flip lock bars: ${cfg.flipLockBars} (effective ${cfg.side === "both" ? cfg.flipLockBars : 0}; 0 = off; shared when side=both)`,
+  );
   console.log("");
-  console.log("TODO — when IB Gateway Paper is running:");
-  console.log("  1. Copy config.example.json → config.json, set mode to \"ib-paper\", port 7497.");
-  console.log("  2. Prefer Python smoke test:  python paper/ib_paper_stub.py");
-  console.log("     (pip install ib_insync). It qualifies MNQ and prints account + contract.");
-  console.log("  3. Next step (not in this scaffold): 1m bar loop → signal → bracket orders");
-  console.log("     matching session America/Chicago 09:00–20:29 (no new entries last 30m before 21:00 close; Fri no new entries from 14:45 CT), 2.5R / 1R EMA tighten, entry limit expires after 2 completed 1m bars, fee tracking.");
-  console.log("");
-  console.log("Refusing to auto-install @stoqey/ib here — add it yourself when ready.");
-  console.log("NEVER point this at live port 7496 until you explicitly set allowLive: true.");
+  console.log("Paper only. Gateway Paper port is 4002. Do not use live ports 4001 or 7496.");
+  console.log("  1. Copy config.example.json → config.json (mode ib-paper, port 4002).");
+  console.log("  2. Connection smoke:  py -3 paper/ib_paper_stub.py --port 4002");
+  console.log("  3. Dry-run (no orders): py -3 paper/ib_paper_loop.py --dry-run --host 127.0.0.1 --port 4002");
+  console.log("  4. Paper orders:        py -3 paper/ib_paper_loop.py --place-orders --host 127.0.0.1 --port 4002");
+  console.log("Daytime session CT 09:00–20:29, Fri no new entries from 14:45, last 30m blocked,");
+  console.log("2.5R / EMA→1R, entry limit expires after 2 completed 1m bars, flip lock default 15.");
+  console.log("NEVER point this at live port 7496 or 4001.");
 }
 
 try {

@@ -9,13 +9,7 @@
  *        npx tsx paper/forward-step.ts --bootstrap
  *        npm run paper:forward
  */
-import {
-  buildLongStrategyScript,
-  buildShortStrategyScript,
-  runStrategyScript,
-  type ScriptRun,
-  type ScriptTrade,
-} from "../lib/strategy-script.ts";
+import type { ScriptTrade } from "../lib/strategy-script.ts";
 import {
   appendTrade,
   assertPaperSafe,
@@ -23,12 +17,13 @@ import {
   loadBars,
   loadConfig,
   loadState,
+  paperFlipLockBars,
   saveState,
   tradePoints,
   type ClosedPaperTrade,
   type OpenVirtualPosition,
-  type PaperConfig,
 } from "./forward-state.ts";
+import { runPaperSides } from "./run-sides.ts";
 
 function isClosed(
   trade: ScriptTrade,
@@ -38,21 +33,6 @@ function isClosed(
   exitReason: "stop" | "target";
 } {
   return trade.exitIndex !== null && trade.exitPrice !== null && trade.exitReason !== null;
-}
-
-function runSides(cfg: PaperConfig, bars: ReturnType<typeof loadBars>): ScriptRun[] {
-  const out: ScriptRun[] = [];
-  if (cfg.side === "long" || cfg.side === "both") {
-    const longRun = runStrategyScript(bars, buildLongStrategyScript(cfg.filters), "long");
-    if (!longRun.ok) throw new Error(`Long script failed: ${longRun.error}`);
-    out.push(longRun);
-  }
-  if (cfg.side === "short" || cfg.side === "both") {
-    const shortRun = runStrategyScript(bars, buildShortStrategyScript(cfg.filters), "short");
-    if (!shortRun.ok) throw new Error(`Short script failed: ${shortRun.error}`);
-    out.push(shortRun);
-  }
-  return out;
 }
 
 function openFromTrade(
@@ -82,7 +62,7 @@ function main() {
     process.exit(1);
   }
 
-  let state = loadState(cfg);
+  const state = loadState(cfg);
   const lastTs = bars[bars.length - 1].ts;
   const firstInit = state.lastProcessedBarTs == null;
 
@@ -95,6 +75,7 @@ function main() {
       startingEquity: cfg.startingEquity,
       side: cfg.side,
       maxContracts: cfg.maxContracts,
+      flipLockBars: cfg.flipLockBars,
     };
     saveState(state);
     console.log("=== MNQ local forward paper — initialized ===");
@@ -107,11 +88,11 @@ function main() {
 
   const cutoff = bootstrap && firstInit ? -Infinity : (state.lastProcessedBarTs ?? -Infinity);
 
-  const runs = runSides(cfg, bars);
+  const runs = runPaperSides(cfg, bars);
   const contracts = 1; // match web backtest fill size
   const newTrades: ClosedPaperTrade[] = [];
 
-  for (const run of runs) {
+  for (const { run } of runs) {
     for (const trade of run.trades) {
       if (!isClosed(trade)) continue;
       const exitTs = bars[trade.exitIndex].ts;
@@ -150,7 +131,7 @@ function main() {
   }
 
   const openPositions: OpenVirtualPosition[] = [];
-  for (const run of runs) {
+  for (const { run } of runs) {
     for (const trade of run.trades) {
       if (trade.exitIndex !== null) continue;
       openPositions.push(openFromTrade(trade, bars, contracts));
@@ -175,6 +156,7 @@ function main() {
     startingEquity: cfg.startingEquity,
     side: cfg.side,
     maxContracts: cfg.maxContracts,
+    flipLockBars: cfg.flipLockBars,
   };
   saveState(state);
 
@@ -192,6 +174,9 @@ function main() {
   console.log(`Total fees:            ${formatMoney(state.totalFees)}`);
   console.log(`Closed trade count:    ${state.closedTradeCount}`);
   console.log(`Last bar:              ${new Date(lastTs).toISOString()}`);
+  console.log(
+    `Flip lock bars:        ${paperFlipLockBars(cfg)} (config ${cfg.flipLockBars}; 0 = off; shared when side=both)`,
+  );
   if (newTrades.length > 0) {
     console.log("--- latest new trades ---");
     for (const t of newTrades.slice(-5)) {

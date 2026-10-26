@@ -771,7 +771,7 @@ export function ReplayWorkspace() {
         the active preset. Equity shows one line per strategy plus Combined when both are on.
         Daytime flip lock (default 15 one-minute bars, 0 = off) blocks a new opposite-side
         entry after a full stop, and only while both runners are on. Replay only moves the
-        cursor. The paper/IB loop still uses the daytime session and filters without this lock.
+        cursor. The paper/IB loop uses this same lock when both sides are on.
       </p>
     </main>
   );

@@ -3,19 +3,15 @@
  * Usage: npx tsx paper/local-runner.ts
  *        npm run paper:local
  */
-import {
-  buildLongStrategyScript,
-  buildShortStrategyScript,
-  runStrategyScript,
-  summarizeMultiBacktest,
-  STRATEGY_COLORS,
-} from "../lib/strategy-script.ts";
+import { summarizeMultiBacktest, STRATEGY_COLORS } from "../lib/strategy-script.ts";
 import {
   assertPaperSafe,
   formatMoney,
   loadBars,
   loadConfig,
+  paperFlipLockBars,
 } from "./forward-state.ts";
+import { runPaperSides } from "./run-sides.ts";
 
 function main() {
   const cfg = loadConfig();
@@ -26,23 +22,19 @@ function main() {
     process.exit(1);
   }
 
-  const runs = [];
-  if (cfg.side === "long" || cfg.side === "both") {
-    const longRun = runStrategyScript(bars, buildLongStrategyScript(cfg.filters), "long");
-    if (!longRun.ok) {
-      console.error("Long script failed:", longRun.error);
-      process.exit(1);
-    }
-    runs.push({ id: "long", name: "Long", color: STRATEGY_COLORS.long, run: longRun });
+  let sides;
+  try {
+    sides = runPaperSides(cfg, bars);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
   }
-  if (cfg.side === "short" || cfg.side === "both") {
-    const shortRun = runStrategyScript(bars, buildShortStrategyScript(cfg.filters), "short");
-    if (!shortRun.ok) {
-      console.error("Short script failed:", shortRun.error);
-      process.exit(1);
-    }
-    runs.push({ id: "short", name: "Short", color: STRATEGY_COLORS.short, run: shortRun });
-  }
+  const runs = sides.map((item) => ({
+    id: item.id,
+    name: item.id === "short" ? "Short" : "Long",
+    color: item.id === "short" ? STRATEGY_COLORS.short : STRATEGY_COLORS.long,
+    run: item.run,
+  }));
 
   const report = summarizeMultiBacktest(runs, bars, cfg.roundTripFeeUsd);
   if (!report) {
@@ -61,6 +53,9 @@ function main() {
     `Filters: bodyRatio=${cfg.filters.bodyRatio} minBody=${cfg.filters.minBody} volLen=${cfg.filters.volLen} volMult=${cfg.filters.volMult}`,
   );
   console.log(`Side: ${cfg.side} | fee/RT: $${cfg.roundTripFeeUsd} | point: $${cfg.pointValue}`);
+  console.log(
+    `Flip lock bars: ${paperFlipLockBars(cfg)} (config ${cfg.flipLockBars}; shared long+short when side=both; 0 = off)`,
+  );
   console.log(`Starting equity: ${formatMoney(cfg.startingEquity)}`);
   console.log("---");
   console.log(`Ending equity:    ${formatMoney(combined.endingEquity)}`);

@@ -6,10 +6,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } fr
 import { dirname, resolve } from "node:path";
 import {
   DEFAULT_ENTRY_FILTERS,
+  DEFAULT_FLIP_LOCK_BARS,
   DEFAULT_ROUND_TRIP_FEE_USD,
+  ENTRY_LIMIT_EXPIRY_BARS,
   MNQ_POINT_VALUE,
   STARTING_NET_ASSET,
   normalizeEntryFilters,
+  normalizeFlipLockBars,
   normalizeRoundTripFee,
   type EntryFilters,
 } from "../lib/strategy-script.ts";
@@ -40,6 +43,13 @@ export type PaperConfig = {
   /** Soft cap note; local runners size 1 contract per fill (match backtest). */
   maxContracts: number;
   side: PaperSide;
+  /**
+   * Opposite-side lock after a full stop, in completed 1m bars.
+   * 15 matches the web daytime default. 0 disables. Shared only when side is both.
+   */
+  flipLockBars: number;
+  /** Unfilled entry limit lifetime in completed 1m bars. Matches the IB loop (default 2). */
+  entryLimitExpiryBars: number;
 };
 
 export type OpenVirtualPosition = {
@@ -80,7 +90,13 @@ export type PaperState = {
   openPositions: OpenVirtualPosition[];
   configSnapshot: Pick<
     PaperConfig,
-    "filters" | "roundTripFeeUsd" | "pointValue" | "startingEquity" | "side" | "maxContracts"
+    | "filters"
+    | "roundTripFeeUsd"
+    | "pointValue"
+    | "startingEquity"
+    | "side"
+    | "maxContracts"
+    | "flipLockBars"
   >;
 };
 
@@ -102,7 +118,35 @@ export function defaultConfig(): PaperConfig {
     startingEquity: STARTING_NET_ASSET,
     maxContracts: 1,
     side: "both",
+    flipLockBars: DEFAULT_FLIP_LOCK_BARS,
+    entryLimitExpiryBars: ENTRY_LIMIT_EXPIRY_BARS,
   };
+}
+
+/** CLI `--flip-lock-bars`, then `FLIP_LOCK_BARS`, then config. Blank CLI/env fall through. */
+export function resolveFlipLockBars(options: {
+  cli?: string | null;
+  env?: string | null;
+  config?: unknown;
+}): number {
+  const cli = options.cli != null && String(options.cli).trim() !== "" ? options.cli : null;
+  const env = options.env != null && String(options.env).trim() !== "" ? options.env : null;
+  const chosen = cli ?? env ?? (options.config === undefined ? DEFAULT_FLIP_LOCK_BARS : options.config);
+  return normalizeFlipLockBars(chosen);
+}
+
+export function flipLockFromArgv(argv: string[]): string | undefined {
+  const index = argv.indexOf("--flip-lock-bars");
+  if (index >= 0 && argv[index + 1] !== undefined && !argv[index + 1].startsWith("--")) {
+    return argv[index + 1];
+  }
+  const inline = argv.find((arg) => arg.startsWith("--flip-lock-bars="));
+  return inline ? inline.slice("--flip-lock-bars=".length) : undefined;
+}
+
+/** Web shares the lock only while both runners are on. */
+export function paperFlipLockBars(cfg: Pick<PaperConfig, "side" | "flipLockBars">): number {
+  return cfg.side === "both" ? cfg.flipLockBars : 0;
 }
 
 export function loadConfig(path = CONFIG_PATH): PaperConfig {
@@ -111,7 +155,17 @@ export function loadConfig(path = CONFIG_PATH): PaperConfig {
     : existsSync(CONFIG_EXAMPLE_PATH)
       ? CONFIG_EXAMPLE_PATH
       : null;
-  if (!file) return defaultConfig();
+  if (!file) {
+    const base = defaultConfig();
+    return {
+      ...base,
+      flipLockBars: resolveFlipLockBars({
+        cli: flipLockFromArgv(process.argv),
+        env: process.env.FLIP_LOCK_BARS,
+        config: base.flipLockBars,
+      }),
+    };
+  }
   const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<PaperConfig>;
   const base = defaultConfig();
   const mode = raw.mode === "ib-paper" ? "ib-paper" : "local";
@@ -140,6 +194,19 @@ export function loadConfig(path = CONFIG_PATH): PaperConfig {
     clientId: typeof raw.clientId === "number" ? raw.clientId : base.clientId,
     allowLive: raw.allowLive === true,
     ibHost: typeof raw.ibHost === "string" ? raw.ibHost : base.ibHost,
+    entryLimitExpiryBars:
+      typeof raw.entryLimitExpiryBars === "number" &&
+      Number.isFinite(raw.entryLimitExpiryBars) &&
+      raw.entryLimitExpiryBars >= 1
+        ? Math.floor(raw.entryLimitExpiryBars)
+        : base.entryLimitExpiryBars,
+    flipLockBars: resolveFlipLockBars({
+      cli: flipLockFromArgv(process.argv),
+      env: process.env.FLIP_LOCK_BARS,
+      config: Object.prototype.hasOwnProperty.call(raw, "flipLockBars")
+        ? raw.flipLockBars
+        : base.flipLockBars,
+    }),
   };
   return cfg;
 }
@@ -177,6 +244,7 @@ export function emptyState(cfg: PaperConfig): PaperState {
       startingEquity: cfg.startingEquity,
       side: cfg.side,
       maxContracts: cfg.maxContracts,
+      flipLockBars: cfg.flipLockBars,
     },
   };
 }
