@@ -13,4 +13,6 @@ Each file in this folder, other than `schema.json`, is one strategy. Thresholds 
 
 Add another file with a unique `id` to run a second copy with different thresholds. `enabled: false` skips a file. A new `type` needs a runner; do not invent one by changing the JSON only.
 
+The replay page does not load these JSON files. Its Preset menu runs `lib/strategy-script.ts`. Daytime 09:00–20:29 is the default. **Eve 20:30–23:59 · stop2 asym · 2.5R+EMA** is a parked candidate (vstrict 0.7 / 6 / SMA(20) × 2.2, stop at 2× risk1, 2.5R target and EMA→1R still on risk1, long and short together) for a later re-check when more MNQ 1m data is in `public/data/mnq-1m-bars.json`. The paper/IB loop stays on the daytime default.
+
 Tests must use synthetic bars. Do not commit real MNQ prints here.

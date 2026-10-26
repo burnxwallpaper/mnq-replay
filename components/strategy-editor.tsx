@@ -58,14 +58,20 @@ export function StrategyEditor({
   onApply,
   defaultScript,
   filtersKey,
+  presetId = "day",
+  presetEpoch = 0,
 }: {
   bars: FixtureBar[];
   /** Fires with the editor source whenever Apply / auto-load runs the long slot. */
   onApply: (source: string, run: ScriptRun) => void;
-  /** Current default long script (from entry filters). */
+  /** Current default long script (daytime filters, or the Eve long leg). */
   defaultScript?: DefaultScriptFn;
   /** When this string changes, re-apply the default long script from filters. */
   filtersKey?: string;
+  /** Daytime persists edits. Eve reloads its long leg and leaves the daytime script in storage. */
+  presetId?: "day" | "eve";
+  /** Bumps when the user reloads the active preset. */
+  presetEpoch?: number;
 }) {
   const resolveDefault = defaultScript ?? (() => DEFAULT_STRATEGY_SCRIPT);
   const [script, setScript] = useState(() => resolveDefault());
@@ -74,6 +80,7 @@ export function StrategyEditor({
   const onApplyRef = useRef(onApply);
   const scriptRef = useRef(script);
   const skipPersistRef = useRef(true);
+  const persistRef = useRef(presetId !== "eve");
   const [appliedSource, setAppliedSource] = useState<string | null>(null);
   onApplyRef.current = onApply;
   scriptRef.current = script;
@@ -131,9 +138,39 @@ export function StrategyEditor({
       delete window.mnqStrategy;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bars]);
+  }, [bars, presetId, presetEpoch]);
 
   useEffect(() => {
+    if (skipPersistRef.current) {
+      skipPersistRef.current = false;
+      return;
+    }
+    if (!persistRef.current) return;
+    writeStoredScript(script);
+  }, [script]);
+
+  // Entry-filter knobs regenerate the daytime long sample. Eve ignores this.
+  useEffect(() => {
+    if (filtersKey == null) return;
+    if (presetId === "eve") return;
+    persistRef.current = true;
+    const next = resolveDefault();
+    scriptRef.current = next;
+    setScript(next);
+    publish(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtersKey, presetId]);
+
+  useEffect(() => {
+    const eve = presetId === "eve";
+    persistRef.current = !eve;
+    if (eve) {
+      const next = resolveDefault();
+      scriptRef.current = next;
+      setScript(next);
+      publish(next);
+      return;
+    }
     const hashed = scriptFromHash();
     const stored = readStoredScript();
     const saved = stored !== null && isStaleDefaultScript(stored) ? null : stored;
@@ -145,27 +182,9 @@ export function StrategyEditor({
     scriptRef.current = next;
     setScript(next);
     publish(next);
-    // Re-run when bars first arrive / change.
+    // Re-run when bars arrive or the user switches/reloads a preset.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bars]);
-
-  useEffect(() => {
-    if (skipPersistRef.current) {
-      skipPersistRef.current = false;
-      return;
-    }
-    writeStoredScript(script);
-  }, [script]);
-
-  // Entry-filter knobs regenerate the default long sample and apply it.
-  useEffect(() => {
-    if (filtersKey == null) return;
-    const next = resolveDefault();
-    scriptRef.current = next;
-    setScript(next);
-    publish(next);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtersKey]);
+  }, [bars, presetId, presetEpoch]);
 
   const lineCount = Math.max(1, script.split("\n").length);
   const gutter = Array.from({ length: lineCount }, (_, line) => String(line + 1)).join("\n");
@@ -177,11 +196,14 @@ export function StrategyEditor({
     >
       <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 className="font-mono text-sm font-medium">Long strategy script</h2>
+          <h2 className="font-mono text-sm font-medium">
+            {presetId === "eve" ? "Eve long script" : "Long strategy script"}
+          </h2>
           <p className="max-w-3xl text-xs text-muted-foreground">
-            Edits only the Long strategy (long trades). Short strategy is separate — toggle
-            it above; it always uses the built-in short sample. Apply updates the Long
-            runner. Edits stay in localStorage under {STRATEGY_STORAGE_KEY}.
+            {presetId === "eve"
+              ? "Long leg of the Eve preset. Short uses the matching Eve script while this preset is selected. Apply updates the Long leg only. Reload the preset to restore both. Eve is not written over the saved Daytime script in "
+              : "Edits only the Long strategy (long trades). Short strategy is separate — toggle it above; it uses the built-in daytime short sample. Apply updates the Long runner. Edits stay in localStorage under "}
+            {STRATEGY_STORAGE_KEY}.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -199,7 +221,7 @@ export function StrategyEditor({
               publish(next);
             }}
           >
-            Reset long sample
+            {presetId === "eve" ? "Reset eve long" : "Reset long sample"}
           </Button>
         </div>
       </div>

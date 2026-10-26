@@ -8,7 +8,7 @@
     "build": "next build",
     "preview": "npx --yes serve out -l 43124",
     "lint": "eslint",
-    "test": "node --experimental-sqlite --import tsx --test --test-concurrency=1 lib/strategies/engine.test.ts",
+    "test": "node --experimental-sqlite --import tsx --test --test-concurrency=1 lib/strategy-script.eve.test.ts",
     "db:init": "node --experimental-sqlite scripts/init-db.mjs",
     "paper:local": "npx tsx paper/local-runner.ts",
     "paper:forward": "npx tsx paper/forward-step.ts",
