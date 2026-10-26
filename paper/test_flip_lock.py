@@ -170,5 +170,338 @@ class ReplayAndDryRunTest(unittest.TestCase):
                 loop.TRADES_PATH = previous_trades
 
 
+class _Contract:
+    def __init__(self, con_id: int = 1) -> None:
+        self.conId = con_id
+
+
+class _Position:
+    def __init__(self, qty: float, con_id: int = 1) -> None:
+        self.contract = _Contract(con_id)
+        self.position = qty
+
+
+class _Order:
+    def __init__(self, order_id: int) -> None:
+        self.orderId = order_id
+
+
+class _Status:
+    def __init__(self, status: str, avg: float = 0.0, filled: float = 0.0) -> None:
+        self.status = status
+        self.avgFillPrice = avg
+        self.filled = filled
+
+
+class _Fill:
+    def __init__(self, price: float, when: datetime) -> None:
+        self.execution = type("_Exec", (), {"price": price})()
+        self.time = when
+
+
+class _Trade:
+    def __init__(
+        self,
+        order_id: int,
+        status: str,
+        price: float | None = None,
+        when: datetime | None = None,
+    ) -> None:
+        self.order = _Order(order_id)
+        if price is None:
+            self.fills = []
+            self.orderStatus = _Status(status)
+        else:
+            self.fills = [_Fill(price, when or datetime.now(timezone.utc))]
+            self.orderStatus = _Status(status, price, 1.0)
+
+
+class _Gateway:
+    """Minimal IB stand-in: position snapshot lags order status, like Paper Gateway."""
+
+    def __init__(self) -> None:
+        self.pos: list[_Position] = []
+        self.book: list[_Trade] = []
+        self.working: list[_Trade] = []
+        self.cancelled: list[int] = []
+        self.placed: list[object] = []
+
+    def positions(self) -> list[_Position]:
+        return self.pos
+
+    def trades(self) -> list[_Trade]:
+        return self.book
+
+    def openTrades(self) -> list[_Trade]:
+        return self.working
+
+    def cancelOrder(self, order: _Order) -> None:
+        self.cancelled.append(order.orderId)
+
+    def placeOrder(self, *_args: object, **_kwargs: object) -> None:
+        self.placed.append(_args)
+        raise AssertionError("order placed")
+
+
+class PaperOrderFillLagTest(unittest.TestCase):
+    """Place-orders must not drop a bracket while positions() is still flat."""
+
+    def setUp(self) -> None:
+        self._prev_state = loop.STATE_PATH
+        self._prev_trades = loop.TRADES_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        self.bars = self._make_bars()
+        loop.STATE_PATH = Path(self._tmp.name) / "state.json"
+        loop.TRADES_PATH = Path(self._tmp.name) / "trades.jsonl"
+        self.gateway = _Gateway()
+        self.runner = loop.PaperLoop(
+            loop.Config(side="both", flipLockBars=15),
+            place_orders=True,
+            dry_run=False,
+        )
+        self.runner.bars = self.bars
+        self.runner.ib = self.gateway
+        self.runner.contract = _Contract()
+        self.runner.state.open = self._pending()
+
+    def tearDown(self) -> None:
+        loop.STATE_PATH = self._prev_state
+        loop.TRADES_PATH = self._prev_trades
+        self._tmp.cleanup()
+
+    def _make_bars(self) -> list[loop.Bar]:
+        # 15:00 UTC = 10:00 CT on a Monday, inside the daytime entry window.
+        start = int(datetime(2026, 10, 26, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        bars = [_bar(start + i * 60_000, 100, 100.25, 99.75, 100, 10) for i in range(23)]
+        bars[21] = _bar(bars[21].ts, 100, 100.25, 90, 90, 5000)
+        return bars
+
+    def _pending(self) -> loop.OpenTrade:
+        return loop.OpenTrade(
+            side="long",
+            entry=100.0,
+            stop=90.0,
+            target=125.0,
+            risk=10.0,
+            entry_ts=self.bars[19].ts,
+            qty=1,
+            parent_order_id=6,
+            tp_order_id=7,
+            sl_order_id=8,
+            entry_filled=False,
+            signal_bar_ts=self.bars[19].ts,
+            simulated=False,
+        )
+
+    def _at(self, index: int, extra_sec: int = 0) -> datetime:
+        return datetime.fromtimestamp(self.bars[index].ts / 1000 + extra_sec, tz=timezone.utc)
+
+    def test_empty_position_keeps_the_bracket_until_the_stop_arms_the_lock(self) -> None:
+        # Same second as PLACE: trades() has nothing yet, positions() is flat.
+        self.runner._sync_position_from_ib(20)
+        self.assertIsNotNone(self.runner.state.open)
+        assert self.runner.state.open is not None
+        self.assertFalse(self.runner.state.open.entry_filled)
+        self.assertEqual(self.runner.state.flip_locks, [])
+        self.assertEqual(self.runner.state.closed_count, 0)
+
+        working = _Trade(6, "Submitted")
+        self.gateway.book.append(working)
+        with self.assertLogs("ib_paper_loop", level="INFO") as pending_logs:
+            self.runner._heartbeat_eval(20, source="test", allow_order=True)
+        pending_text = "\n".join(pending_logs.output)
+        self.assertIn("pending-long", pending_text)
+        self.assertNotIn("clearing local open state", pending_text)
+        self.assertIsNotNone(self.runner.state.open)
+
+        # Inactive is not a cancel. A just-transmitted bracket can report it.
+        self.gateway.book[0] = _Trade(6, "Inactive")
+        self.runner._sync_position_from_ib(20)
+        self.assertIsNotNone(self.runner.state.open)
+
+        # Parent filled; position snapshot still empty; the bar even trades the stop.
+        # That must not book a close before a child fill or a real position.
+        assert self.runner.state.open is not None
+        self.runner.state.open.stop = 99.75
+        self.gateway.book[0] = _Trade(6, "Filled", price=100.25, when=self._at(20, 1))
+        self.runner._sync_position_from_ib(20)
+        assert self.runner.state.open is not None
+        self.assertTrue(self.runner.state.open.entry_filled)
+        self.assertFalse(self.runner.state.open.position_seen)
+        self.assertEqual(self.runner.state.open.entry, 100.25)
+        self.assertEqual(self.runner.state.closed_count, 0)
+        self.assertEqual(self.runner.state.flip_locks, [])
+
+        self.runner.state.open.stop = 90.0
+        self.gateway.pos.append(_Position(1))
+        self.runner._sync_position_from_ib(20)
+        assert self.runner.state.open is not None
+        self.assertTrue(self.runner.state.open.position_seen)
+        self.assertEqual(self.runner.state.closed_count, 0)
+
+        # Stop fills a few seconds into the stop bar. Position snapshot is flat again.
+        self.gateway.pos.clear()
+        self.gateway.book.append(_Trade(8, "Filled", price=90.0, when=self._at(20, 24)))
+        with self.assertLogs("ib_paper_loop", level="INFO") as stop_logs:
+            self.runner._heartbeat_eval(21, source="test", allow_order=True)
+        stop_text = "\n".join(stop_logs.output)
+        self.assertIn("CLOSED stop", stop_text)
+        self.assertIn("FLIP-LOCK armed", stop_text)
+        self.assertIn("SIGNAL short", stop_text)
+        self.assertIn("flip_lock=True", stop_text)
+        self.assertIn("FLIP-LOCK block short", stop_text)
+        self.assertNotIn("clearing local open state", stop_text)
+        self.assertIsNone(self.runner.state.open)
+        self.assertEqual(self.gateway.placed, [])
+        self.assertEqual(self.runner.state.closed_count, 1)
+        self.assertEqual(len(self.runner.state.flip_locks), 1)
+        self.assertEqual(self.runner.state.flip_locks[0].exit_ts, self.bars[20].ts)
+        self.assertEqual(self.runner.state.flip_locks[0].stop_side, "long")
+        locks = self.runner.state.flip_locks
+        self.assertIsNone(flip_lock.signal_flip_locked(locks, self.bars, "short", 20, 15))
+        self.assertIsNotNone(flip_lock.signal_flip_locked(locks, self.bars, "short", 21, 15))
+        self.assertIsNotNone(flip_lock.signal_flip_locked(locks, self.bars, "short", 35, 15))
+        self.assertIsNone(flip_lock.signal_flip_locked(locks, self.bars, "short", 36, 15))
+        self.assertIsNone(flip_lock.signal_flip_locked(locks, self.bars, "long", 21, 15))
+
+    def test_stop_fill_arms_lock_when_the_position_snapshot_never_arrives(self) -> None:
+        when = self._at(20, 24)
+        self.gateway.book = [
+            _Trade(6, "Filled", price=100.25, when=self._at(20, 1)),
+            _Trade(8, "Filled", price=90.0, when=when),
+        ]
+        self.runner._sync_position_from_ib(20)
+        self.assertIsNone(self.runner.state.open)
+        self.assertEqual(self.runner.state.closed_count, 1)
+        self.assertEqual(len(self.runner.state.flip_locks), 1)
+        self.assertEqual(self.runner.state.flip_locks[0].stop_side, "long")
+        self.assertEqual(self.runner.state.flip_locks[0].exit_ts, self.bars[20].ts)
+        self.assertIsNotNone(
+            flip_lock.signal_flip_locked(self.runner.state.flip_locks, self.bars, "short", 21, 15)
+        )
+
+    def test_target_fill_does_not_arm_and_cancelled_parent_does_not_book(self) -> None:
+        self.gateway.book = [
+            _Trade(6, "Filled", price=100.0, when=self._at(20, 1)),
+            _Trade(7, "Filled", price=125.0, when=self._at(20, 30)),
+        ]
+        with self.assertLogs("ib_paper_loop", level="INFO") as target_logs:
+            self.runner._sync_position_from_ib(20)
+        target_text = "\n".join(target_logs.output)
+        self.assertIn("CLOSED target", target_text)
+        self.assertNotIn("FLIP-LOCK armed", target_text)
+        self.assertEqual(self.runner.state.flip_locks, [])
+        self.assertEqual(self.runner.state.closed_count, 1)
+
+        self.runner.state.open = self._pending()
+        self.runner.state.closed_count = 0
+        self.gateway.book = [_Trade(6, "Cancelled")]
+        with self.assertLogs("ib_paper_loop", level="INFO") as cancel_logs:
+            self.runner._sync_position_from_ib(20)
+        self.assertIn("clearing local open state", "\n".join(cancel_logs.output))
+        self.assertIsNone(self.runner.state.open)
+        self.assertEqual(self.runner.state.closed_count, 0)
+        self.assertEqual(self.runner.state.flip_locks, [])
+
+        self.runner.state.open = self._pending()
+        self.gateway.book = [_Trade(6, "ApiCancelled")]
+        self.runner._sync_position_from_ib(20)
+        self.assertIsNone(self.runner.state.open)
+        self.assertEqual(self.runner.state.flip_locks, [])
+
+    def test_entry_limit_expiry_still_cancels_a_resting_parent(self) -> None:
+        assert self.runner.state.open is not None
+        self.runner.state.open.signal_bar_ts = self.bars[18].ts
+        resting = _Trade(6, "Submitted")
+        self.gateway.book = [resting]
+        self.gateway.working = [resting]
+        with self.assertLogs("ib_paper_loop", level="INFO") as logs:
+            self.runner._heartbeat_eval(20, source="test", allow_order=True)
+        text = "\n".join(logs.output)
+        self.assertIn("EXPIRE unfilled", text)
+        self.assertNotIn("clearing local open state", text)
+        self.assertEqual(self.gateway.cancelled, [6])
+        self.assertIsNone(self.runner.state.open)
+        self.assertEqual(self.runner.state.flip_locks, [])
+        self.assertEqual(self.runner.state.closed_count, 0)
+
+    def test_short_position_marks_the_entry_without_dropping_it(self) -> None:
+        assert self.runner.state.open is not None
+        self.runner.state.open.side = "short"
+        self.gateway.pos.append(_Position(-1))
+        self.runner._sync_position_from_ib(20)
+        assert self.runner.state.open is not None
+        self.assertTrue(self.runner.state.open.entry_filled)
+        self.assertTrue(self.runner.state.open.position_seen)
+        self.assertEqual(self.runner.state.closed_count, 0)
+
+    def test_restart_with_no_orders_and_a_flat_book_still_arms_from_the_bar(self) -> None:
+        assert self.runner.state.open is not None
+        self.runner.state.open.entry_filled = True
+        self.runner.state.open.position_seen = False
+        self.runner.state.open.stop = 99.75
+        self.runner._sync_position_from_ib(20)
+        self.assertIsNone(self.runner.state.open)
+        self.assertEqual(self.runner.state.closed_count, 1)
+        self.assertEqual(len(self.runner.state.flip_locks), 1)
+        self.assertEqual(self.runner.state.flip_locks[0].exit_ts, self.bars[20].ts)
+
+    def test_saved_state_without_position_seen_treats_a_filled_entry_as_seen(self) -> None:
+        loop.STATE_PATH.write_text(
+            json.dumps(
+                {
+                    "open": {
+                        "side": "long",
+                        "entry": 100,
+                        "stop": 90,
+                        "target": 125,
+                        "risk": 10,
+                        "entry_filled": True,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = loop.load_state(loop.Config())
+        assert loaded.open is not None
+        self.assertTrue(loaded.open.entry_filled)
+        self.assertTrue(loaded.open.position_seen)
+
+        loop.STATE_PATH.write_text(
+            json.dumps(
+                {
+                    "open": {
+                        "side": "short",
+                        "entry": 100,
+                        "stop": 110,
+                        "target": 80,
+                        "risk": 10,
+                        "entry_filled": True,
+                        "position_seen": False,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        lagged = loop.load_state(loop.Config())
+        assert lagged.open is not None
+        self.assertTrue(lagged.open.entry_filled)
+        self.assertFalse(lagged.open.position_seen)
+
+    def test_zero_bars_books_the_stop_without_arming(self) -> None:
+        self.runner.flip_lock_bars = 0
+        self.gateway.book = [
+            _Trade(6, "Filled", price=100.0, when=self._at(20, 1)),
+            _Trade(8, "Filled", price=90.0, when=self._at(20, 24)),
+        ]
+        with self.assertLogs("ib_paper_loop", level="INFO") as logs:
+            self.runner._sync_position_from_ib(20)
+        text = "\n".join(logs.output)
+        self.assertIn("CLOSED stop", text)
+        self.assertNotIn("FLIP-LOCK armed", text)
+        self.assertEqual(self.runner.state.flip_locks, [])
+        self.assertEqual(self.runner.state.closed_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
