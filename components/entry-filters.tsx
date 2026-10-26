@@ -72,10 +72,15 @@ export function EntryFiltersPanel({
   value,
   feeUsd,
   onChange,
+  locked = false,
+  lockedNote,
 }: {
   value: EntryFilters;
   feeUsd: number;
   onChange: (next: EntryFiltersSave) => void;
+  /** Preset bakes these numbers into its scripts, so the knobs do not edit that preset. */
+  locked?: boolean;
+  lockedNote?: string;
 }) {
   const [draft, setDraft] = useState<EntryFilters>(value);
   const [feeDraft, setFeeDraft] = useState<number>(feeUsd);
@@ -105,34 +110,38 @@ export function EntryFiltersPanel({
             Entry filters
           </h2>
           <p className="text-xs text-muted-foreground">
-            改數字後撳 Save 先套用到 Long／Short 預設腳本同手續費（session + 5 EMA 不變）· body ≥
-            ratio · body pts · vol &gt; SMA × mult · round-trip fee
-            {dirty ? (
+            {locked
+              ? (lockedNote ??
+                "This preset bakes its filters into the script. Switch to Daytime to edit the default.")
+              : "改數字後撳 Save 先套用到 Long／Short 預設腳本同手續費（session + 5 EMA 不變）· body ≥ ratio · body pts · vol > SMA × mult · round-trip fee"}
+            {(locked ? feeDraft !== feeUsd : dirty) ? (
               <span className="ml-1 text-amber-300/90">· unsaved</span>
             ) : null}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            className="font-mono text-xs text-muted-foreground underline-offset-2 hover:underline"
-            onClick={() => {
-              setDraft(DEFAULT_ENTRY_FILTERS);
-              setFeeDraft(DEFAULT_ROUND_TRIP_FEE_USD);
-            }}
-          >
-            Reset {DEFAULT_ENTRY_FILTERS.bodyRatio} / {DEFAULT_ENTRY_FILTERS.minBody} /{" "}
-            {DEFAULT_ENTRY_FILTERS.volLen}×{DEFAULT_ENTRY_FILTERS.volMult} · fee $
-            {DEFAULT_ROUND_TRIP_FEE_USD}
-          </button>
+          {locked ? null : (
+            <button
+              type="button"
+              className="font-mono text-xs text-muted-foreground underline-offset-2 hover:underline"
+              onClick={() => {
+                setDraft(DEFAULT_ENTRY_FILTERS);
+                setFeeDraft(DEFAULT_ROUND_TRIP_FEE_USD);
+              }}
+            >
+              Reset {DEFAULT_ENTRY_FILTERS.bodyRatio} / {DEFAULT_ENTRY_FILTERS.minBody} /{" "}
+              {DEFAULT_ENTRY_FILTERS.volLen}×{DEFAULT_ENTRY_FILTERS.volMult} · fee $
+              {DEFAULT_ROUND_TRIP_FEE_USD}
+            </button>
+          )}
           <button
             type="button"
             id="entry-filters-save"
-            disabled={!dirty}
+            disabled={locked ? feeDraft === feeUsd : !dirty}
             className="rounded-md bg-foreground px-2.5 py-1 font-mono text-xs text-background disabled:cursor-not-allowed disabled:opacity-40"
             onClick={() =>
               onChange({
-                filters: normalizeEntryFilters(draft),
+                filters: locked ? value : normalizeEntryFilters(draft),
                 roundTripFeeUsd: normalizeRoundTripFee(feeDraft),
               })
             }
@@ -159,6 +168,7 @@ export function EntryFiltersPanel({
               min={field.min}
               max={field.max}
               value={draft[field.key]}
+              disabled={locked}
               onChange={(event) => {
                 const raw = event.target.valueAsNumber;
                 if (!Number.isFinite(raw)) return;

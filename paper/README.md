@@ -52,7 +52,9 @@ py -3 ib_paper_loop.py --dry-run --max-bars 2
 3. **緊急**：喺 TWS／Gateway 將帳戶設 **Read-Only API**，或登出 Gateway  
 4. **程式安全**：預設拒絕 Live 埠 **4001／7496**（除非 `allowLive: true`）
 
-### 策略對齊（同網頁 Combined 預設）
+### 策略對齊（同網頁 Daytime 預設）
+
+網頁 Preset 入面嘅 **Eve 20:30–23:59 · stop2 asym · 2.5R+EMA** 只係 replay 候選，唔會改呢度。Paper／IB 循環保持下面嘅日盤預設。
 
 - Filters：`0.45 / 2 / 15 / 1.2`  
 - Session：`America/Chicago` **09:00–20:29** 先開新倉（session close 21:00；收市前 30 分鐘唔再開新倉）；**星期五 CT 14:45 起唔再開新倉**；已開倉照常管理／平倉  
@@ -100,5 +102,6 @@ py -3 paper/ib_paper_stub.py
 
 - **Loop:** `py -3 paper/ib_paper_loop.py --dry-run` then `--place-orders` on Paper (port **4002**).  
 - **Bars:** 1m via historical `keepUpToDate` (not 5s realtime bars).  
-- **Orders:** limit at bar close + bracket stop/target; unfilled entry cancels after **2** completed 1m bars; EMA tighten modifies TP to 1R after fill.  
+- **Orders:** limit at bar close + bracket stop/target; unfilled entry cancels after **2** completed 1m bars; EMA tighten modifies TP to 1R after fill.
+- **Preset:** the replay page can load an optional Eve 20:30–23:59 candidate. This loop stays on the daytime default above.  
 - **Safety:** refuses 4001/7496; Ctrl+C stops the loop — cancel resting orders in Gateway if needed.

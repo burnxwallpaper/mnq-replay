@@ -32,6 +32,30 @@ export const DEFAULT_ENTRY_FILTERS: EntryFilters = {
   volMult: 1.2,
 };
 
+/**
+ * vstrict filters for the parked evening candidate.
+ * The daytime default stays on DEFAULT_ENTRY_FILTERS.
+ */
+export const EVE_ENTRY_FILTERS: EntryFilters = {
+  bodyRatio: 0.7,
+  minBody: 6,
+  volLen: 20,
+  volMult: 2.2,
+};
+
+export const STRATEGY_PRESET_STORAGE_KEY = "mnq-replay.strategyPreset";
+
+export type StrategyPresetId = "day" | "eve";
+
+export const STRATEGY_PRESETS: { id: StrategyPresetId; label: string }[] = [
+  { id: "day", label: "Daytime 09:00–20:29 (default)" },
+  { id: "eve", label: "Eve 20:30–23:59 · stop2 asym · 2.5R+EMA" },
+];
+
+export function normalizeStrategyPreset(raw: unknown): StrategyPresetId {
+  return raw === "eve" ? "eve" : "day";
+}
+
 function clampFilters(raw: Partial<EntryFilters> | null | undefined): EntryFilters {
   const base = DEFAULT_ENTRY_FILTERS;
   const num = (value: unknown, fallback: number) => {
@@ -159,7 +183,65 @@ return null
 export const DEFAULT_STRATEGY_SCRIPT = buildLongStrategyScript(DEFAULT_ENTRY_FILTERS);
 export const DEFAULT_SHORT_STRATEGY_SCRIPT = buildShortStrategyScript(DEFAULT_ENTRY_FILTERS);
 
+/** Chicago minute-of-day bounds for the evening candidate (20:30 through 23:59 inclusive). */
+const EVE_SESSION_START_MINS = 20 * 60 + 30;
+const EVE_SESSION_END_MINS = 23 * 60 + 59;
+
+function buildEveLegScript(side: "long" | "short", filters: EntryFilters): string {
+  const f = clampFilters(filters);
+  const bearish = side === "short";
+  const riskExpr = bearish ? "Math.max(bar.h - bar.c, 1)" : "Math.max(bar.c - bar.l, 1)";
+  const stopExpr = bearish ? "bar.c + risk1 * 2" : "bar.c - risk1 * 2";
+  const targetExpr = bearish ? "bar.c - risk1 * 2.5" : "bar.c + risk1 * 2.5";
+  const emaCmp = bearish ? "bar.c > ema5" : "bar.c < ema5";
+  const emaTarget = bearish ? "position.entry - position.risk" : "position.entry + position.risk";
+  const impulseCmp = bearish ? "<" : ">";
+  const extremeName = bearish ? "high" : "low";
+  return `// PRESET=eve-2030-2359
+// Eve baseline candidate (parked for later review — not the daytime default).
+// MNQ 1-minute ${side} impulse. Entries only America/Chicago 20:30–23:59 (not the rest of the overnight session).
+// vstrict filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
+// stopMult=2 asym: risk1 = max(|close - ${extremeName}|, 1); stop is 2×risk1 from the close.
+// Target is 2.5× risk1. A 5 EMA cross tightens the target to 1× risk1 (position.risk), not to the widened stop.
+// Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
+// Pair with the other Eve leg for combined long+short. Fee $1.6 and 1 contract are app settings.
+// Snapshot on the 41581-bar file (not live truth): ~$10642 final asset · MaxDD $185 · WR 69% · n=62.
+// Page Avg RR uses risk1 (~+0.38R there). An earlier +0.19 counted R off the 2× stop.
+
+const ema5 = ta.ema(i, 5, "c")
+if (position && position.side === "${side}" && ${emaCmp}) {
+  return { target: ${emaTarget} }
+}
+
+// EVE_SESSION=20:30–23:59 America/Chicago. No Friday cutoff. Hours outside this window do not enter.
+const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
+const ctMins = Number(ctParts.find((p) => p.type === "hour")?.value ?? 0) * 60 + Number(ctParts.find((p) => p.type === "minute")?.value ?? 0)
+const sessionOk = ctMins >= ${EVE_SESSION_START_MINS} && ctMins <= ${EVE_SESSION_END_MINS}
+const avgVol = ta.sma(i, ${f.volLen}, "v")
+const body = Math.abs(bar.c - bar.o)
+const span = Math.max(bar.h - bar.l, 0.25)
+if (!position && sessionOk && bar.c ${impulseCmp} bar.o && body / span >= ${f.bodyRatio} && body >= ${f.minBody} && bar.v > avgVol * ${f.volMult}) {
+  const risk1 = ${riskExpr}
+  return { signal: true, side: "${side}", stop: ${stopExpr}, target: ${targetExpr}, risk: risk1 }
+}
+return null
+`;
+}
+
+export function buildEveLongStrategyScript(filters: EntryFilters = EVE_ENTRY_FILTERS): string {
+  return buildEveLegScript("long", filters);
+}
+
+export function buildEveShortStrategyScript(filters: EntryFilters = EVE_ENTRY_FILTERS): string {
+  return buildEveLegScript("short", filters);
+}
+
+export const EVE_LONG_STRATEGY_SCRIPT = buildEveLongStrategyScript();
+export const EVE_SHORT_STRATEGY_SCRIPT = buildEveShortStrategyScript();
+
 export function isStaleDefaultScript(script: string) {
+  // The evening candidate is its own preset, not an outdated daytime default.
+  if (script.includes("PRESET=eve-2030-2359")) return false;
   if (script === LEGACY_DEFAULT_STRATEGY_SCRIPT || script === EMA_EXIT_DEFAULT_STRATEGY_SCRIPT) {
     return true;
   }
@@ -267,6 +349,11 @@ function readSignal(value: unknown): {
   side: "long" | "short";
   stop: number;
   target: number;
+  /**
+   * Original risk1 when the script uses an asymmetric stop.
+   * Null means R is |signal close − stop|, which is the daytime default.
+   */
+  risk: number | null;
 } | null {
   if (typeof value !== "object" || value === null) return null;
   const record = Object.fromEntries(Object.entries(value));
@@ -275,7 +362,13 @@ function readSignal(value: unknown): {
   const stop = readNumber(record, "stop");
   const target = readNumber(record, "target");
   if (stop === null || target === null) return null;
-  return { side, stop, target };
+  const risk = readNumber(record, "risk");
+  return {
+    side,
+    stop,
+    target,
+    risk: risk !== null && risk > 0 ? risk : null,
+  };
 }
 
 
@@ -531,7 +624,10 @@ export function runStrategyScript(
     const signal = readSignal(result);
     if (!signal) continue;
     const limit = bar.c;
-    const risk = Math.max(Math.abs(limit - signal.stop), 0.25);
+    const stopDistance = Math.max(Math.abs(limit - signal.stop), 0.25);
+    // Asym stops pass risk1 explicitly so 2.5R, EMA→1R, and Avg RR use it.
+    // Daytime scripts omit risk, so R stays the distance from the close to the stop.
+    const risk = signal.risk ?? stopDistance;
     markers.push({
       strategyId,
       barIndex: i,

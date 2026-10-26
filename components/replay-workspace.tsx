@@ -20,19 +20,26 @@ import {
   DEFAULT_ENTRY_FILTERS,
   DEFAULT_ROUND_TRIP_FEE_USD,
   ENTRY_FILTERS_STORAGE_KEY,
+  EVE_ENTRY_FILTERS,
+  EVE_LONG_STRATEGY_SCRIPT,
+  EVE_SHORT_STRATEGY_SCRIPT,
   ROUND_TRIP_FEE_STORAGE_KEY,
   STRATEGY_COLORS,
+  STRATEGY_PRESETS,
+  STRATEGY_PRESET_STORAGE_KEY,
   buildLongStrategyScript,
   buildShortStrategyScript,
   mergeScriptRuns,
   normalizeEntryFilters,
   normalizeRoundTripFee,
+  normalizeStrategyPreset,
   runStrategyScript,
   scoreScript,
   summarizeMultiBacktest,
   type EntryFilters,
   type NamedScriptRun,
   type ScriptRun,
+  type StrategyPresetId,
 } from "@/lib/strategy-script";
 
 const PLAY_MS = 180;
@@ -115,6 +122,22 @@ function writeRoundTripFee(feeUsd: number) {
   }
 }
 
+function readStrategyPreset(): StrategyPresetId {
+  try {
+    return normalizeStrategyPreset(window.localStorage.getItem(STRATEGY_PRESET_STORAGE_KEY));
+  } catch {
+    return "day";
+  }
+}
+
+function writeStrategyPreset(preset: StrategyPresetId) {
+  try {
+    window.localStorage.setItem(STRATEGY_PRESET_STORAGE_KEY, preset);
+  } catch {
+    // Ignore private-mode storage failures.
+  }
+}
+
 function readShowPriceChart(): boolean {
   try {
     const raw = window.localStorage.getItem(SHOW_PRICE_CHART_STORAGE_KEY);
@@ -150,25 +173,41 @@ export function ReplayWorkspace() {
   const [roundTripFeeUsd, setRoundTripFeeUsd] = useState(DEFAULT_ROUND_TRIP_FEE_USD);
   const [filtersEpoch, setFiltersEpoch] = useState(0);
   const [showPriceChart, setShowPriceChart] = useState(false);
-  const filtersHydratedRef = useRef(false);
+  const [presetId, setPresetId] = useState<StrategyPresetId>("day");
+  const [presetEpoch, setPresetEpoch] = useState(0);
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
   const priceChartHydratedRef = useRef(false);
   const lastIndex = bars ? bars.length - 1 : 0;
   const toggleRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const saved = readEnabledRunners();
-    setLongEnabled(saved.long);
-    setShortEnabled(saved.short);
-    setEntryFilters(readEntryFilters());
+    const preset = readStrategyPreset();
+    setPresetId(preset);
+    if (preset === "eve") {
+      setLongEnabled(true);
+      setShortEnabled(true);
+      setEntryFilters(EVE_ENTRY_FILTERS);
+    } else {
+      setLongEnabled(saved.long);
+      setShortEnabled(saved.short);
+      setEntryFilters(readEntryFilters());
+    }
     setRoundTripFeeUsd(readRoundTripFee());
     setShowPriceChart(readShowPriceChart());
-    filtersHydratedRef.current = true;
     priceChartHydratedRef.current = true;
+    setSettingsHydrated(true);
   }, []);
 
   useEffect(() => {
+    if (!settingsHydrated || presetId !== "day") return;
     writeEnabledRunners(longEnabled, shortEnabled);
-  }, [longEnabled, shortEnabled]);
+  }, [longEnabled, shortEnabled, presetId, settingsHydrated]);
+
+  useEffect(() => {
+    if (!settingsHydrated) return;
+    writeStrategyPreset(presetId);
+  }, [presetId, settingsHydrated]);
 
   useEffect(() => {
     if (!priceChartHydratedRef.current) return;
@@ -176,14 +215,14 @@ export function ReplayWorkspace() {
   }, [showPriceChart]);
 
   useEffect(() => {
-    if (!filtersHydratedRef.current) return;
+    if (!settingsHydrated || presetId !== "day") return;
     writeEntryFilters(entryFilters);
-  }, [entryFilters]);
+  }, [entryFilters, presetId, settingsHydrated]);
 
   useEffect(() => {
-    if (!filtersHydratedRef.current) return;
+    if (!settingsHydrated) return;
     writeRoundTripFee(roundTripFeeUsd);
-  }, [roundTripFeeUsd]);
+  }, [roundTripFeeUsd, settingsHydrated]);
 
   useEffect(() => {
     let cancelled = false;
@@ -243,6 +282,21 @@ export function ReplayWorkspace() {
     toggleRef.current();
   }
 
+  function selectPreset(next: StrategyPresetId) {
+    setPresetId(next);
+    setPresetEpoch((current) => current + 1);
+    if (next === "eve") {
+      setLongEnabled(true);
+      setShortEnabled(true);
+      setEntryFilters(EVE_ENTRY_FILTERS);
+      return;
+    }
+    const saved = readEnabledRunners();
+    setLongEnabled(saved.long);
+    setShortEnabled(saved.short);
+    setEntryFilters(readEntryFilters());
+  }
+
   function scrub(next: number) {
     setPlaying(false);
     setIndex(Math.min(lastIndex, Math.max(0, next)));
@@ -256,10 +310,15 @@ export function ReplayWorkspace() {
   const namedRuns: NamedScriptRun[] = useMemo(() => {
     if (!bars) return [];
     const list: NamedScriptRun[] = [];
+    const eve = presetId === "eve";
     if (longEnabled) {
-      const run =
-        longRun ??
-        (longSource ? runStrategyScript(bars, longSource, "long") : null);
+      const eveSource =
+        longSource && longSource.includes("PRESET=eve-2030-2359")
+          ? longSource
+          : EVE_LONG_STRATEGY_SCRIPT;
+      const run = eve
+        ? runStrategyScript(bars, eveSource, "long")
+        : (longRun ?? (longSource ? runStrategyScript(bars, longSource, "long") : null));
       if (run) {
         list.push({
           id: "long",
@@ -274,11 +333,15 @@ export function ReplayWorkspace() {
         id: "short",
         name: "Short strategy",
         color: STRATEGY_COLORS.short,
-        run: runStrategyScript(bars, buildShortStrategyScript(entryFilters), "short"),
+        run: runStrategyScript(
+          bars,
+          eve ? EVE_SHORT_STRATEGY_SCRIPT : buildShortStrategyScript(entryFilters),
+          "short",
+        ),
       });
     }
     return list;
-  }, [bars, longEnabled, shortEnabled, longRun, longSource, entryFilters]);
+  }, [bars, longEnabled, shortEnabled, longRun, longSource, entryFilters, presetId]);
 
   const mergedRun = useMemo(() => {
     if (namedRuns.length === 0) return null;
@@ -378,6 +441,29 @@ export function ReplayWorkspace() {
           <span className="text-xs tracking-wide text-muted-foreground uppercase">
             Strategies
           </span>
+          <label className="inline-flex items-center gap-2" htmlFor="strategy-preset">
+            <span className="text-xs tracking-wide text-muted-foreground uppercase">Preset</span>
+            <select
+              id="strategy-preset"
+              value={presetId}
+              onChange={(event) => selectPreset(normalizeStrategyPreset(event.target.value))}
+              className="max-w-[22rem] rounded-md border border-foreground/15 bg-background px-2 py-1 text-xs text-foreground"
+            >
+              {STRATEGY_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            id="strategy-preset-reload"
+            onClick={() => selectPreset(presetId)}
+            className="rounded-md border border-foreground/15 px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            Reload preset
+          </button>
           <label className="inline-flex cursor-pointer items-center gap-2">
             <input
               id="runner-long"
@@ -408,13 +494,26 @@ export function ReplayWorkspace() {
           </label>
         </div>
         <p id="strategy-runners-help" className="text-xs text-muted-foreground">
-          Long = long only · Short = short only · check both to compare · 長倉／短倉／兩邊一齊跑
+          {presetId === "eve"
+            ? "Eve candidate: CT 20:30–23:59 only, vstrict 0.7/6/20×2.2, stop 2× risk1, target and EMA→1R still use risk1. Combined long+short. Daytime stays the default when you switch back."
+            : "Daytime default: CT 09:00–20:29, Fri no new entries from 14:45, filters 0.45/2/15×1.2, stop at the bar extreme. Long = long only · Short = short only · check both to compare."}
         </p>
+        {presetId === "eve" ? (
+          <p id="strategy-preset-note" className="text-xs text-muted-foreground">
+            Parked for another look after more MNQ 1m data — not a replacement for the daytime
+            session. Snapshot on this 41581-bar file (re-run after each refresh; not live truth):
+            about $10,642 final asset, max DD $185, win rate 69%, 62 trades. Avg RR here is in
+            risk1 units (about +0.38R). The earlier +0.19 counted those same results off the 2×
+            stop. Fee $1.6, 1 contract, entry limit expires after 2 bars.
+          </p>
+        ) : null}
       </div>
 
       <EntryFiltersPanel
         value={entryFilters}
         feeUsd={roundTripFeeUsd}
+        locked={presetId === "eve"}
+        lockedNote="Eve preset bakes vstrict 0.7 / 6 / SMA(20) × 2.2 into both scripts. Switch to Daytime to edit the default filters. Round-trip fee still applies."
         onChange={(next) => {
           setEntryFilters(normalizeEntryFilters(next.filters));
           setRoundTripFeeUsd(normalizeRoundTripFee(next.roundTripFeeUsd));
@@ -585,8 +684,16 @@ export function ReplayWorkspace() {
 
       <StrategyEditor
         bars={bars}
-        defaultScript={() => buildLongStrategyScript(entryFilters)}
-        filtersKey={filtersEpoch > 0 ? `${filtersEpoch}:${JSON.stringify(entryFilters)}` : undefined}
+        presetId={presetId}
+        presetEpoch={presetEpoch}
+        defaultScript={() =>
+          presetId === "eve" ? EVE_LONG_STRATEGY_SCRIPT : buildLongStrategyScript(entryFilters)
+        }
+        filtersKey={
+          presetId === "day" && filtersEpoch > 0
+            ? `${filtersEpoch}:${JSON.stringify(entryFilters)}`
+            : undefined
+        }
         onApply={(source, run) => {
           setLongSource(source);
           setLongRun(run);
@@ -595,10 +702,10 @@ export function ReplayWorkspace() {
       />
 
       <p className="text-xs text-muted-foreground">
-        Check Long strategy and/or Short strategy above the chart — that is the
-        only run control. The editor below edits Long only; Short always uses the
-        built-in inverse. Equity shows one line per strategy plus Combined when
-        both are on. Replay only moves the cursor.
+        The Preset menu chooses Daytime (default) or the parked Eve candidate. Check Long
+        and/or Short above the chart to run them. The editor edits the Long leg; Short follows
+        the active preset. Equity shows one line per strategy plus Combined when both are on.
+        Replay only moves the cursor. The paper/IB loop keeps the daytime default.
       </p>
     </main>
   );
