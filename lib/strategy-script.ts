@@ -395,7 +395,7 @@ export const ENTRY_LIMIT_EXPIRY_BARS = 2;
  * Short sell-limit: mirror.
  * Returns fill price or null.
  */
-function resolveEntryLimitFill(
+export function resolveEntryLimitFill(
   bar: OhlcvBar,
   side: "long" | "short",
   limit: number,
@@ -414,7 +414,7 @@ function resolveEntryLimitFill(
 }
 
 /** Realistic OHLC fill: gap-through at open, else level if touched. Prefer stop if both. */
-function resolveExitFill(
+export function resolveExitFill(
   bar: OhlcvBar,
   side: "long" | "short",
   stop: number,
@@ -477,7 +477,7 @@ type PendingEntry = {
   barsWaited: number;
 };
 
-type FlipLock = {
+export type FlipLock = {
   /** Stop exit bar. A signal on this same bar is still allowed. */
   fromBar: number;
   /** Last blocked signal bar: exitIndex + flipLockBars. */
@@ -498,7 +498,8 @@ type StrategyLeg = {
   pending: PendingEntry | null;
 };
 
-function noteStopFlipLock(
+/** Append a lock when a trade exits on a full stop. Target exits and `flipLockBars <= 0` do nothing. */
+export function noteStopFlipLock(
   locks: FlipLock[],
   flipLockBars: number,
   exitIndex: number,
@@ -513,8 +514,12 @@ function noteStopFlipLock(
   });
 }
 
-/** True when `signalIndex` is strictly after a stop and still inside that lock. */
-function isOppositeFlipLocked(
+/**
+ * True when `signalIndex` is strictly after a stop and still inside that lock.
+ * Same-side signals return false. Paper's Python mirror (`paper/flip_lock.py`)
+ * must stay aligned with this function.
+ */
+export function isOppositeFlipLocked(
   locks: FlipLock[],
   side: "long" | "short",
   signalIndex: number,

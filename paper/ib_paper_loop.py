@@ -16,10 +16,14 @@ Safety:
   - --place-orders: submit Paper limit + bracket (still refuses live ports)
   - Unfilled entry limit expires after ENTRY_LIMIT_EXPIRY_BARS completed 1m bars (default 2)
   - maxContracts defaults to 1
+  - Daytime flip lock (default 15): after a full stop, block opposite-side entries
+    for the next 15 completed 1m bars. Same side stays allowed. 0 disables.
+    Shared by long and short when side=both. Paper sockets only.
 
-Usage (Windows, Gateway Paper open on 4002):
-  py -3 paper/ib_paper_loop.py --dry-run
-  py -3 paper/ib_paper_loop.py --place-orders
+Usage (Windows, Gateway Paper open on 4002 — not live 4001/7496):
+  py -3 paper/ib_paper_loop.py --dry-run --host 127.0.0.1 --port 4002
+  py -3 paper/ib_paper_loop.py --place-orders --host 127.0.0.1 --port 4002
+  py -3 paper/ib_paper_loop.py --place-orders --flip-lock-bars 0
   Ctrl+C to stop (cancel open entry optional; brackets left for kill-switch docs)
 """
 from __future__ import annotations
@@ -27,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -40,6 +45,24 @@ LIVE_PORTS = {7496, 4001}
 # Unfilled entry Limit: cancel after this many *completed* 1m bars after the signal bar.
 ENTRY_LIMIT_EXPIRY_BARS = 2
 PAPER_DIR = Path(__file__).resolve().parent
+if str(PAPER_DIR) not in sys.path:
+    sys.path.insert(0, str(PAPER_DIR))
+
+from flip_lock import (  # noqa: E402
+    DEFAULT_FLIP_LOCK_BARS,
+    TsFlipLock,
+    arm_stop_flip_lock,
+    bar_covering_ts,
+    effective_flip_lock_bars,
+    exit_reason_from_order_fills,
+    normalize_flip_lock_bars,
+    prune_flip_locks,
+    resolve_entry_limit_fill,
+    resolve_exit_fill,
+    resolve_flip_lock_bars,
+    signal_flip_locked,
+)
+
 STATE_PATH = PAPER_DIR / "state.json"
 TRADES_PATH = PAPER_DIR / "trades.jsonl"
 UTC = timezone.utc
@@ -95,6 +118,8 @@ class Config:
     limitOffsetTicks: float = 0.0  # 0 = limit at bar close; MNQ tick=0.25
     rewardMultiple: float = 2.5  # initial TP in R; EMA may tighten to 1R
     entryLimitExpiryBars: int = 2  # cancel unfilled entry after N completed 1m bars
+    # Opposite-side lock after a full stop. 15 matches the web daytime default. 0 disables.
+    flipLockBars: int = DEFAULT_FLIP_LOCK_BARS
 
 
 def load_config() -> Config:
@@ -131,6 +156,9 @@ def load_config() -> Config:
         limitOffsetTicks=float(raw.get("limitOffsetTicks", 0)),
         rewardMultiple=float(raw.get("rewardMultiple", 2.5)),
         entryLimitExpiryBars=max(1, int(raw.get("entryLimitExpiryBars", ENTRY_LIMIT_EXPIRY_BARS))),
+        flipLockBars=normalize_flip_lock_bars(raw["flipLockBars"])
+        if "flipLockBars" in raw
+        else DEFAULT_FLIP_LOCK_BARS,
     )
 
 
@@ -160,6 +188,7 @@ class OpenTrade:
     entry_filled: bool = False
     signal_bar_ts: int = 0  # completed bar that generated the signal
     bars_waited: int = 0  # completed bars after signal while still unfilled
+    simulated: bool = False  # dry-run virtual book; never an IB order
 
 
 @dataclass
@@ -172,6 +201,7 @@ class RuntimeState:
     total_fees: float = 0.0
     contract_local: str = ""
     contract_con_id: int = 0
+    flip_locks: list[TsFlipLock] = field(default_factory=list)
 
 
 def load_state(cfg: Config) -> RuntimeState:
@@ -199,7 +229,22 @@ def load_state(cfg: Config) -> RuntimeState:
             entry_filled=bool(open_raw.get("entry_filled", False)),
             signal_bar_ts=int(open_raw.get("signal_bar_ts", 0) or 0),
             bars_waited=int(open_raw.get("bars_waited", 0) or 0),
+            simulated=bool(open_raw.get("simulated", False)),
         )
+    locks: list[TsFlipLock] = []
+    for item in raw.get("flip_locks") or []:
+        if not isinstance(item, dict):
+            continue
+        side = item.get("stop_side")
+        if side not in ("long", "short"):
+            continue
+        try:
+            exit_ts = int(item.get("exit_ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if exit_ts <= 0:
+            continue
+        locks.append(TsFlipLock(exit_ts=exit_ts, stop_side=str(side)))
     return RuntimeState(
         equity=float(raw.get("equity", cfg.startingEquity)),
         peak_equity=float(raw.get("peak_equity", cfg.startingEquity)),
@@ -209,6 +254,7 @@ def load_state(cfg: Config) -> RuntimeState:
         total_fees=float(raw.get("total_fees", 0)),
         contract_local=str(raw.get("contract_local", "")),
         contract_con_id=int(raw.get("contract_con_id", 0)),
+        flip_locks=locks,
     )
 
 
@@ -221,6 +267,7 @@ def save_state(state: RuntimeState) -> None:
         "total_fees": state.total_fees,
         "contract_local": state.contract_local,
         "contract_con_id": state.contract_con_id,
+        "flip_locks": [asdict(lock) for lock in state.flip_locks],
         "updated_at": datetime.now(tz=UTC).isoformat(),
         "open": None,
     }
@@ -450,6 +497,86 @@ def round_to_tick(price: float, tick: float = 0.25) -> float:
     return round(price / tick) * tick
 
 
+def replay_flip_locks(
+    bars: list[Bar],
+    filters: Filters,
+    side_mode: str,
+    flip_lock_bars: int,
+    reward_multiple: float = 2.5,
+    entry_limit_expiry_bars: int = ENTRY_LIMIT_EXPIRY_BARS,
+) -> list[TsFlipLock]:
+    """Rebuild stop locks from bars without placing orders.
+
+    Uses one net position, matching the IB book (long and short offset). The last
+    bar is treated as still forming and is not decided. A full stop arms the shared
+    lock; a same-bar opposite signal is still allowed.
+    """
+    n = effective_flip_lock_bars(side_mode, flip_lock_bars)
+    if n <= 0 or len(bars) < 2:
+        return []
+    locks: list[TsFlipLock] = []
+    open_trade: Optional[OpenTrade] = None
+    last = len(bars) - 2
+    for index in range(last + 1):
+        bar = bars[index]
+        if open_trade is not None and open_trade.entry_filled:
+            exit_fill = resolve_exit_fill(bar, open_trade.side, open_trade.stop, open_trade.target)
+            if exit_fill is None:
+                managed = evaluate_bar(
+                    bars, index, filters, side_mode, open_trade, reward_multiple
+                )
+                if managed.tighten_target is not None and not open_trade.tightened:
+                    open_trade.target = managed.tighten_target
+                    open_trade.tightened = True
+                continue
+            _price, reason = exit_fill
+            arm_stop_flip_lock(locks, n, bar.ts, open_trade.side, reason)
+            open_trade = None
+        elif open_trade is not None and not open_trade.entry_filled:
+            if bar.ts <= open_trade.signal_bar_ts:
+                continue
+            fill = resolve_entry_limit_fill(bar, open_trade.side, open_trade.entry, open_trade.stop)
+            if fill is not None:
+                open_trade.entry = fill
+                open_trade.entry_filled = True
+                open_trade.entry_ts = bar.ts
+                exit_fill = resolve_exit_fill(bar, open_trade.side, open_trade.stop, open_trade.target)
+                if exit_fill is None:
+                    continue
+                _price, reason = exit_fill
+                arm_stop_flip_lock(locks, n, bar.ts, open_trade.side, reason)
+                open_trade = None
+            else:
+                waited = sum(1 for seen in bars[: index + 1] if seen.ts > open_trade.signal_bar_ts)
+                open_trade.bars_waited = waited
+                if waited >= entry_limit_expiry_bars:
+                    open_trade = None
+                continue
+
+        if open_trade is not None:
+            continue
+        result = evaluate_bar(bars, index, filters, side_mode, None, reward_multiple)
+        if result.signal is None:
+            continue
+        if signal_flip_locked(locks, bars, result.signal.side, index, n) is not None:
+            continue
+        sig = result.signal
+        open_trade = OpenTrade(
+            side=sig.side,
+            entry=sig.entry,
+            stop=sig.stop,
+            target=sig.target,
+            risk=sig.risk,
+            entry_ts=bar.ts,
+            qty=1,
+            simulated=True,
+            entry_filled=False,
+            signal_bar_ts=bar.ts,
+            bars_waited=0,
+        )
+    return locks
+
+
 # ---------------------------------------------------------------------------
 # Loop
 # ---------------------------------------------------------------------------
@@ -468,6 +595,10 @@ class PaperLoop:
         self._stopping = False
         self._last_processed_ts: Optional[int] = None
         self._tick = 0.25
+        self.flip_lock_bars = effective_flip_lock_bars(cfg.side, cfg.flipLockBars)
+        if self.place_orders and self.state.open is not None and self.state.open.simulated:
+            Log.info("Ignoring simulated dry-run position; Paper orders follow the Gateway book")
+            self.state.open = None
 
     def connect(self) -> None:
         from ib_insync import IB  # type: ignore
@@ -475,12 +606,16 @@ class PaperLoop:
         refuse_live(self.cfg.ibPort, self.cfg.allowLive)
         self.ib = IB()
         Log.info(
-            "Connecting %s:%s clientId=%s place_orders=%s dry_run=%s",
+            "PAPER ONLY. Connecting %s:%s clientId=%s place_orders=%s dry_run=%s "
+            "flipLockBars=%s effective=%s side=%s",
             self.cfg.ibHost,
             self.cfg.ibPort,
             self.cfg.clientId,
             self.place_orders,
             self.dry_run,
+            self.cfg.flipLockBars,
+            self.flip_lock_bars,
+            self.cfg.side,
         )
         self.ib.connect(
             self.cfg.ibHost,
@@ -587,6 +722,7 @@ class PaperLoop:
                 "Log out other TWS/Gateway/mobile trading sessions, wait ~1 minute, retry. "
                 "Weekend: equity-index futures are usually closed Fri–Sun evening CT."
             )
+        self._seed_flip_locks()
         completed_idx = max(0, len(self.bars) - 2) if len(self.bars) >= 2 else 0
         self._heartbeat_eval(completed_idx, source="warmup-completed", allow_order=False)
         self._last_processed_ts = self.bars[completed_idx].ts
@@ -614,32 +750,68 @@ class PaperLoop:
         except Exception:  # noqa: BLE001
             Log.exception("Error in bar update handler")
 
+    def _seed_flip_locks(self) -> None:
+        """Union warmup-bar stops with locks already stored in state.json."""
+        if self.flip_lock_bars <= 0:
+            self.state.flip_locks = []
+            Log.info("Flip lock off (bars=%s side=%s)", self.cfg.flipLockBars, self.cfg.side)
+            return
+        seeded = replay_flip_locks(
+            self.bars,
+            self.cfg.filters,
+            self.cfg.side,
+            self.cfg.flipLockBars,
+            self.cfg.rewardMultiple,
+            self.cfg.entryLimitExpiryBars,
+        )
+        for lock in seeded:
+            arm_stop_flip_lock(self.state.flip_locks, self.flip_lock_bars, lock.exit_ts, lock.stop_side, "stop")
+        self.state.flip_locks = prune_flip_locks(self.state.flip_locks, self.bars, self.flip_lock_bars)
+        Log.info(
+            "Flip lock armed windows=%s (N=%s, shared long+short)",
+            len(self.state.flip_locks),
+            self.flip_lock_bars,
+        )
+        save_state(self.state)
+
     def _heartbeat_eval(self, index: int, source: str, allow_order: bool) -> None:
         bar = self.bars[index]
         ct = datetime.fromtimestamp(bar.ts / 1000, tz=CHICAGO)
 
-        # Sync open position with IB if we think we are in a trade
+        # Sync open position with IB if we think we are in a real trade.
         if self.state.open and self.place_orders:
-            self._sync_position_from_ib()
+            if self.state.open.simulated:
+                Log.info("Dropping simulated position; Gateway is the Paper book")
+                self.state.open = None
+            else:
+                self._sync_position_from_ib(index)
 
-        # Unfilled entry limit expiry: count completed bars after the signal bar.
-        if self.state.open and not self.state.open.entry_filled:
+        # Dry-run virtual book: limit fill, expiry, stop/target. No orders.
+        if not self.place_orders and self.state.open is not None:
+            status = self._advance_simulated(index)
+            if status in ("pending", "expired"):
+                if self.state.open is None:
+                    self._log_bar(source, ct, bar, "flat")
+                else:
+                    waited = self.state.open.bars_waited
+                    expiry = self.cfg.entryLimitExpiryBars
+                    self._log_bar(
+                        source,
+                        ct,
+                        bar,
+                        f"pending-{self.state.open.side}@{self.state.open.entry} waited={waited}/{expiry}",
+                    )
+                # An expired limit does not free this same bar for a new signal
+                # (the web engine stays on the pending leg for that bar).
+                return
+
+        # Unfilled Paper entry: count completed bars after the signal bar.
+        if self.place_orders and self.state.open and not self.state.open.entry_filled:
             waited = self._bars_since_signal(index)
             self.state.open.bars_waited = waited
             expiry = self.cfg.entryLimitExpiryBars
             pos = f"pending-{self.state.open.side}@{self.state.open.entry} waited={waited}/{expiry}"
-            Log.info(
-                "BAR %s %s O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f session=%s pos=%s",
-                source,
-                ct.strftime("%Y-%m-%d %H:%M %Z"),
-                bar.o,
-                bar.h,
-                bar.l,
-                bar.c,
-                bar.v,
-                session_ok(bar.ts),
-                pos,
-            )
+            self._log_bar(source, ct, bar, pos)
             if waited >= expiry:
                 self._cancel_unfilled_entry(
                     f"entry limit expired after {waited} completed 1m bar(s) "
@@ -659,18 +831,7 @@ class PaperLoop:
             self.cfg.rewardMultiple,
         )
         pos = "flat" if self.state.open is None else f"{self.state.open.side}@{self.state.open.entry}"
-        Log.info(
-            "BAR %s %s O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f session=%s pos=%s",
-            source,
-            ct.strftime("%Y-%m-%d %H:%M %Z"),
-            bar.o,
-            bar.h,
-            bar.l,
-            bar.c,
-            bar.v,
-            session_ok(bar.ts),
-            pos,
-        )
+        self._log_bar(source, ct, bar, pos)
 
         if result.tighten_target is not None and self.state.open and self.state.open.entry_filled:
             new_tp = round_to_tick(result.tighten_target, self._tick)
@@ -690,22 +851,117 @@ class PaperLoop:
             return
 
         sig = result.signal
+        blocked = signal_flip_locked(
+            self.state.flip_locks,
+            self.bars,
+            sig.side,
+            index,
+            self.flip_lock_bars,
+        )
         Log.info(
-            "SIGNAL %s entry=%.2f stop=%.2f target=%.2f risk=%.2f dry_run=%s",
+            "SIGNAL %s entry=%.2f stop=%.2f target=%.2f risk=%.2f dry_run=%s flip_lock=%s",
             sig.side,
             sig.entry,
             sig.stop,
             sig.target,
             sig.risk,
             self.dry_run or not allow_order,
+            blocked is not None,
         )
-        if not allow_order or self.dry_run or not self.place_orders:
-            Log.info("Order skipped (dry-run / no place-orders / warmup)")
+        if blocked is not None:
+            Log.info(
+                "FLIP-LOCK block %s after %s stop (signal index %s, locked through index %s, N=%s)",
+                sig.side,
+                blocked.stop_side,
+                index,
+                blocked.until_bar,
+                self.flip_lock_bars,
+            )
+            return
+        if not allow_order:
+            Log.info("Order skipped (warmup)")
             return
         if self.state.open is not None:
             Log.info("Already in position — skip new signal")
             return
+        if not self.place_orders:
+            self._open_simulated(sig, signal_bar_ts=bar.ts)
+            Log.info("DRY-RUN virtual %s limit @ %.2f (no order sent)", sig.side, sig.entry)
+            save_state(self.state)
+            return
         self._place_bracket(sig, signal_bar_ts=bar.ts)
+
+    def _log_bar(self, source: str, ct: datetime, bar: Bar, pos: str) -> None:
+        Log.info(
+            "BAR %s %s O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f session=%s pos=%s",
+            source,
+            ct.strftime("%Y-%m-%d %H:%M %Z"),
+            bar.o,
+            bar.h,
+            bar.l,
+            bar.c,
+            bar.v,
+            session_ok(bar.ts),
+            pos,
+        )
+
+    def _advance_simulated(self, index: int) -> str:
+        """Move the dry-run book by one completed bar. Returns pending, expired, open, or flat."""
+        ot = self.state.open
+        if ot is None:
+            return "flat"
+        bar = self.bars[index]
+        if not ot.entry_filled:
+            if bar.ts <= ot.signal_bar_ts:
+                return "pending"
+            fill = resolve_entry_limit_fill(bar, ot.side, ot.entry, ot.stop)
+            if fill is not None:
+                ot.entry = fill
+                ot.entry_filled = True
+                ot.entry_ts = bar.ts
+                Log.info("SIM FILL %s @ %.2f", ot.side, fill)
+                return self._maybe_sim_exit(index)
+            waited = self._bars_since_signal(index)
+            ot.bars_waited = waited
+            if waited >= self.cfg.entryLimitExpiryBars:
+                Log.info(
+                    "SIM EXPIRE unfilled %s after %s completed 1m bar(s)",
+                    ot.side,
+                    waited,
+                )
+                self.state.open = None
+                save_state(self.state)
+                return "expired"
+            return "pending"
+        return self._maybe_sim_exit(index)
+
+    def _maybe_sim_exit(self, index: int) -> str:
+        ot = self.state.open
+        if ot is None or not ot.entry_filled:
+            return "flat" if ot is None else "pending"
+        bar = self.bars[index]
+        exit_fill = resolve_exit_fill(bar, ot.side, ot.stop, ot.target)
+        if exit_fill is None:
+            return "open"
+        price, reason = exit_fill
+        self._book_close(price, bar.ts, reason, note="dry-run OHLC")
+        return "flat"
+
+    def _open_simulated(self, sig: Signal, signal_bar_ts: int) -> None:
+        entry = round_to_tick(sig.entry + self.cfg.limitOffsetTicks * self._tick, self._tick)
+        self.state.open = OpenTrade(
+            side=sig.side,
+            entry=entry,
+            stop=round_to_tick(sig.stop, self._tick),
+            target=round_to_tick(sig.target, self._tick),
+            risk=sig.risk,
+            entry_ts=int(time.time() * 1000),
+            qty=self.cfg.maxContracts,
+            simulated=True,
+            entry_filled=False,
+            signal_bar_ts=int(signal_bar_ts),
+            bars_waited=0,
+        )
 
     def _ib_position_qty(self) -> float:
         assert self.ib and self.contract
@@ -715,9 +971,39 @@ class PaperLoop:
                 total += float(p.position)
         return total
 
-    def _sync_position_from_ib(self) -> None:
+    def _order_fill(self, order_id: Optional[int]) -> tuple[bool, Optional[float], Optional[int]]:
+        """Return filled, price, and fill time (ms) for one order id."""
+        if not self.ib or order_id is None:
+            return False, None, None
+        for trade in self.ib.trades():
+            if trade.order.orderId != order_id:
+                continue
+            fills = list(getattr(trade, "fills", []) or [])
+            status = str(getattr(trade.orderStatus, "status", "") or "")
+            filled = status.lower() == "filled" or bool(fills)
+            price: Optional[float] = None
+            ts_ms: Optional[int] = None
+            if fills:
+                last = fills[-1]
+                execution = getattr(last, "execution", None)
+                exec_price = getattr(execution, "price", None) if execution is not None else None
+                if exec_price:
+                    price = float(exec_price)
+                dt = getattr(last, "time", None)
+                if isinstance(dt, datetime):
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=UTC)
+                    ts_ms = int(dt.timestamp() * 1000)
+            if price is None and filled:
+                avg = float(getattr(trade.orderStatus, "avgFillPrice", 0) or 0)
+                if avg:
+                    price = avg
+            return filled, price, ts_ms
+        return False, None, None
+
+    def _sync_position_from_ib(self, completed_index: Optional[int] = None) -> None:
         """If brackets filled / stopped, clear local open and log trade."""
-        if not self.state.open:
+        if not self.state.open or self.state.open.simulated:
             return
         qty = self._ib_position_qty()
         # Still holding
@@ -728,19 +1014,64 @@ class PaperLoop:
             return
         # Flat while we thought open → closed (or entry never filled / cancelled)
         if abs(qty) < 1e-9 and self.state.open.entry_filled:
-            Log.info("Position flat on IB — booking close for accounting")
-            self._book_close_approx()
+            sl_filled, sl_px, sl_ts = self._order_fill(self.state.open.sl_order_id)
+            tp_filled, tp_px, tp_ts = self._order_fill(self.state.open.tp_order_id)
+            reason = exit_reason_from_order_fills(sl_filled, tp_filled)
+            if reason == "stop":
+                exit_px = self.state.open.stop if sl_px is None else sl_px
+                fill_ts = sl_ts
+            elif reason == "target":
+                exit_px = self.state.open.target if tp_px is None else tp_px
+                fill_ts = tp_ts
+            else:
+                exit_px = self.bars[-1].c if self.bars else self.state.open.entry
+                fill_ts = None
+                # Order status can lag the position. A bar that traded the stop still arms the lock.
+                candidates: list[Bar] = []
+                if completed_index is not None and 0 <= completed_index < len(self.bars):
+                    candidates.append(self.bars[completed_index])
+                if self.bars:
+                    candidates.append(self.bars[-1])
+                seen_ts: set[int] = set()
+                for candidate in candidates:
+                    if candidate.ts in seen_ts:
+                        continue
+                    seen_ts.add(candidate.ts)
+                    ohlc = resolve_exit_fill(
+                        candidate,
+                        self.state.open.side,
+                        self.state.open.stop,
+                        self.state.open.target,
+                    )
+                    if ohlc is None:
+                        continue
+                    exit_px, reason = ohlc
+                    fill_ts = candidate.ts
+                    Log.info("IB flat; bar OHLC exit %s @ %.2f", reason, exit_px)
+                    break
+                if reason is None:
+                    Log.info("IB flat without a stop or target — flip lock not armed")
+            if fill_ts is not None and self.bars:
+                covered = bar_covering_ts(self.bars, fill_ts)
+                exit_ts = int(covered.ts) if covered is not None else int(fill_ts)
+            elif completed_index is not None and 0 <= completed_index < len(self.bars):
+                exit_ts = self.bars[completed_index].ts
+            elif self.bars:
+                exit_ts = self.bars[-1].ts
+            else:
+                exit_ts = int(time.time() * 1000)
+            Log.info("Position flat on IB — booking close (%s)", reason or "manual")
+            self._book_close(exit_px, exit_ts, reason or "manual", note="IB flat detect")
         elif abs(qty) < 1e-9 and not self.state.open.entry_filled:
             # Check if parent cancelled / expired without fill
             Log.info("No position and entry not filled — clearing local open state")
             self.state.open = None
 
-    def _book_close_approx(self) -> None:
-        """Accounting-only close using last bar mid; IB paper has its own P&L."""
+    def _book_close(self, exit_px: float, exit_ts: int, reason: str, note: str) -> None:
+        """Account the close. A full stop arms the shared flip lock; a target does not."""
         if not self.state.open or not self.bars:
             return
         ot = self.state.open
-        exit_px = self.bars[-1].c
         sign = 1 if ot.side == "long" else -1
         points = (exit_px - ot.entry) * sign
         pnl = points * self.cfg.pointValue * ot.qty - self.cfg.roundTripFeeUsd
@@ -748,6 +1079,18 @@ class PaperLoop:
         self.state.peak_equity = max(self.state.peak_equity, self.state.equity)
         self.state.closed_count += 1
         self.state.total_fees += self.cfg.roundTripFeeUsd
+        armed = arm_stop_flip_lock(
+            self.state.flip_locks,
+            self.flip_lock_bars,
+            exit_ts,
+            ot.side,
+            reason,
+        )
+        self.state.flip_locks = prune_flip_locks(
+            self.state.flip_locks,
+            self.bars,
+            self.flip_lock_bars,
+        )
         append_trade(
             {
                 "side": ot.side,
@@ -760,20 +1103,31 @@ class PaperLoop:
                 "pnl_usd_acct": pnl,
                 "fee_usd": self.cfg.roundTripFeeUsd,
                 "entry_ts": ot.entry_ts,
-                "exit_ts": self.bars[-1].ts,
+                "exit_ts": exit_ts,
+                "exit_reason": reason,
                 "tightened": ot.tightened,
-                "note": "approx close from IB flat detect",
+                "simulated": ot.simulated,
+                "note": note,
             }
         )
         Log.info(
-            "CLOSED approx %s entry=%.2f exit=%.2f pnl_acct=$%.2f equity=$%.2f",
+            "CLOSED %s %s entry=%.2f exit=%.2f pnl_acct=$%.2f equity=$%.2f flip_lock=%s",
+            reason,
             ot.side,
             ot.entry,
             exit_px,
             pnl,
             self.state.equity,
+            armed,
         )
+        if armed:
+            Log.info(
+                "FLIP-LOCK armed after %s stop for %s one-minute bars (opposite side only)",
+                ot.side,
+                self.flip_lock_bars,
+            )
         self.state.open = None
+        save_state(self.state)
 
     def _place_bracket(self, sig: Signal, signal_bar_ts: int) -> None:
         from ib_insync import LimitOrder, StopOrder  # type: ignore
@@ -904,7 +1258,12 @@ class PaperLoop:
 
     def run_forever(self) -> None:
         assert self.ib
-        Log.info("Loop running. Ctrl+C to stop. dry_run=%s place_orders=%s", self.dry_run, self.place_orders)
+        Log.info(
+            "Loop running. Ctrl+C to stop. dry_run=%s place_orders=%s flipLockBars=%s. Paper only.",
+            self.dry_run,
+            self.place_orders,
+            self.flip_lock_bars,
+        )
 
         def _handle_sig(_signum: int, _frame: Any) -> None:
             Log.info("Signal received — shutting down")
@@ -926,7 +1285,7 @@ class PaperLoop:
                 break
             self.ib.sleep(1)
             # Periodic position sync
-            if self.place_orders and self.state.open:
+            if self.place_orders and self.state.open and not self.state.open.simulated:
                 try:
                     self._sync_position_from_ib()
                     save_state(self.state)
@@ -975,6 +1334,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="If >0, exit after this many seconds (smoke tests)",
     )
+    p.add_argument(
+        "--flip-lock-bars",
+        default=None,
+        help="Opposite-side lock after a full stop, in completed 1m bars. "
+        "Default 15 (daytime). 0 disables. Overrides FLIP_LOCK_BARS and config.json.",
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 
@@ -991,6 +1356,11 @@ def main() -> int:
     cfg.ibPort = args.port
     cfg.clientId = args.client_id
     cfg.allowLive = bool(args.allow_live)
+    cfg.flipLockBars = resolve_flip_lock_bars(
+        None if args.flip_lock_bars is None else str(args.flip_lock_bars),
+        os.environ.get("FLIP_LOCK_BARS"),
+        cfg.flipLockBars,
+    )
 
     place = bool(args.place_orders)
     dry = bool(args.dry_run) and not place

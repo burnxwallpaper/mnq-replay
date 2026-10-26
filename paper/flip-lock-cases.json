@@ -1,0 +1,144 @@
+{
+  "locks": [
+    {
+      "name": "opposite window is 15 bars after the stop, same side and the stop bar stay open",
+      "flipLockBars": 15,
+      "steps": [
+        { "note": { "exitIndex": 6, "stopSide": "long", "reason": "stop" } },
+        { "check": { "side": "short", "signalIndex": 7 } },
+        { "check": { "side": "short", "signalIndex": 21 } },
+        { "check": { "side": "short", "signalIndex": 22 } },
+        { "check": { "side": "long", "signalIndex": 8 } },
+        { "check": { "side": "short", "signalIndex": 6 } }
+      ]
+    },
+    {
+      "name": "zero disables",
+      "flipLockBars": 0,
+      "steps": [
+        { "note": { "exitIndex": 6, "stopSide": "long", "reason": "stop" } },
+        { "check": { "side": "short", "signalIndex": 7 } }
+      ]
+    },
+    {
+      "name": "target exit does not lock",
+      "flipLockBars": 15,
+      "steps": [
+        { "note": { "exitIndex": 6, "stopSide": "long", "reason": "target" } },
+        { "check": { "side": "short", "signalIndex": 7 } }
+      ]
+    },
+    {
+      "name": "a later opposite stop starts a new lock",
+      "flipLockBars": 15,
+      "steps": [
+        { "note": { "exitIndex": 6, "stopSide": "long", "reason": "stop" } },
+        { "note": { "exitIndex": 23, "stopSide": "short", "reason": "stop" } },
+        { "check": { "side": "long", "signalIndex": 24 } },
+        { "check": { "side": "long", "signalIndex": 38 } },
+        { "check": { "side": "long", "signalIndex": 39 } },
+        { "check": { "side": "short", "signalIndex": 30 } }
+      ]
+    }
+  ],
+  "normalize": [
+    { "raw": 0, "fallback": null },
+    { "raw": "0", "fallback": null },
+    { "raw": 15.4, "fallback": null },
+    { "raw": -3, "fallback": null },
+    { "raw": "nope", "fallback": null },
+    { "raw": -3, "fallback": 0 },
+    { "raw": 14.5, "fallback": null },
+    { "raw": 6000, "fallback": null }
+  ],
+  "fills": [
+    {
+      "name": "long stop wins when both levels are inside the bar",
+      "kind": "exit",
+      "bar": { "o": 100, "h": 131, "l": 97, "c": 100 },
+      "side": "long",
+      "stop": 98,
+      "target": 130
+    },
+    {
+      "name": "long target",
+      "kind": "exit",
+      "bar": { "o": 100, "h": 131, "l": 99, "c": 120 },
+      "side": "long",
+      "stop": 98,
+      "target": 130
+    },
+    {
+      "name": "long gap through stop fills at the open",
+      "kind": "exit",
+      "bar": { "o": 97, "h": 99, "l": 96, "c": 98 },
+      "side": "long",
+      "stop": 98,
+      "target": 130
+    },
+    {
+      "name": "short stop",
+      "kind": "exit",
+      "bar": { "o": 100, "h": 103, "l": 70, "c": 100 },
+      "side": "short",
+      "stop": 102,
+      "target": 70
+    },
+    {
+      "name": "short target",
+      "kind": "exit",
+      "bar": { "o": 100, "h": 101, "l": 69, "c": 90 },
+      "side": "short",
+      "stop": 102,
+      "target": 70
+    },
+    {
+      "name": "no exit",
+      "kind": "exit",
+      "bar": { "o": 100, "h": 101, "l": 99, "c": 100 },
+      "side": "long",
+      "stop": 98,
+      "target": 130
+    },
+    {
+      "name": "long limit fills at the open",
+      "kind": "entry",
+      "bar": { "o": 99, "h": 100, "l": 99, "c": 99.5 },
+      "side": "long",
+      "limit": 100,
+      "stop": 98
+    },
+    {
+      "name": "long open through the stop does not fill",
+      "kind": "entry",
+      "bar": { "o": 97, "h": 100, "l": 96, "c": 99 },
+      "side": "long",
+      "limit": 100,
+      "stop": 98
+    },
+    {
+      "name": "long limit fills when the low trades the limit",
+      "kind": "entry",
+      "bar": { "o": 101, "h": 102, "l": 100, "c": 101 },
+      "side": "long",
+      "limit": 100,
+      "stop": 98
+    },
+    {
+      "name": "short limit fills at the open",
+      "kind": "entry",
+      "bar": { "o": 101, "h": 101.5, "l": 100.5, "c": 101 },
+      "side": "short",
+      "limit": 100,
+      "stop": 102
+    },
+    {
+      "name": "short open through the stop does not fill",
+      "kind": "entry",
+      "bar": { "o": 103, "h": 104, "l": 100, "c": 101 },
+      "side": "short",
+      "limit": 100,
+      "stop": 102
+    }
+  ]
+}
