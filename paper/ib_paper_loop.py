@@ -30,7 +30,11 @@ Usage (Windows, Gateway Paper open on 4002 — not live 4001/7496):
   py -3 paper/ib_paper_loop.py --dry-run --host 127.0.0.1 --port 4002
   py -3 paper/ib_paper_loop.py --place-orders --host 127.0.0.1 --port 4002
   py -3 paper/ib_paper_loop.py --place-orders --flip-lock-bars 0
-  Ctrl+C to stop (cancel open entry optional; brackets left for kill-switch docs)
+  Ctrl+C / SIGTERM to stop (brackets left for the kill-switch docs)
+
+If the Gateway API drops, the loop reconnects the same host, port, and clientId
+with capped backoff until Ctrl+C / SIGTERM. It re-qualifies MNQ, resubscribes
+to 1m keepUpToDate, and reloads state.json so an open bracket is not sent twice.
 """
 from __future__ import annotations
 
@@ -49,6 +53,12 @@ from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 LIVE_PORTS = {7496, 4001}
+# ib_insync: disconnectedEvent fires from client.apiEnd when a ready socket drops
+# (and from IB.disconnect while still connected). isConnected() is client.isReady().
+# IB.sleep is util.sleep and does not raise on a peer close, so the loop has to
+# watch the event and isConnected(). These errorEvent codes mean the API/Gateway
+# link is gone. Market-data farm notices (2103 and the like) recover in place.
+_LOST_CONNECTION_CODES = frozenset({1100, 502, 504, 1300})
 # Unfilled entry Limit: cancel after this many *completed* 1m bars after the signal bar.
 ENTRY_LIMIT_EXPIRY_BARS = 2
 # Dead parent, and only these. "Inactive" is left alone: a bracket can sit there
@@ -76,6 +86,18 @@ _TP_MODIFY_REJECT_CODES = frozenset({
 # Paper Gateway rejects 10326 within a few milliseconds. Wait long enough to
 # see that before recording the 1R target locally.
 _TP_MODIFY_ACK_SEC = 1.0
+
+
+def reconnect_backoff_seconds(attempt: int) -> float:
+    """Delay before reconnect attempt N (1-based): 1s, 2s, 4s, … capped at 30s."""
+    if attempt < 1:
+        return 1.0
+    # attempt 6 is 32s before the cap. Don't build 2**n once n no longer fits a float.
+    if attempt >= 6:
+        return 30.0
+    return float(2 ** (attempt - 1))
+
+
 PAPER_DIR = Path(__file__).resolve().parent
 if str(PAPER_DIR) not in sys.path:
     sys.path.insert(0, str(PAPER_DIR))
@@ -634,6 +656,17 @@ class PaperLoop:
         self.contract: Any = None
         self._hist_bars: Any = None
         self._stopping = False
+        self._disconnected = False
+        self._reconnecting = False
+        self._reconnect_attempt = 0
+        self._deadline: Optional[float] = None
+        self._signals_installed = False
+        self._prev_sigint: Any = None
+        self._prev_sigterm: Any = None
+        self._timeout_sec = 0
+        self._session_started = False
+        self._ib_token: object = None
+        self._lost_during_connect = False
         self._last_processed_ts: Optional[int] = None
         self._tp_modify_in_progress = False
         self._tick = 0.25
@@ -642,11 +675,37 @@ class PaperLoop:
             Log.info("Ignoring simulated dry-run position; Paper orders follow the Gateway book")
             self.state.open = None
 
-    def connect(self) -> None:
+    def _make_ib(self) -> Any:
         from ib_insync import IB  # type: ignore
 
+        return IB()
+
+    def connect(self) -> None:
         refuse_live(self.cfg.ibPort, self.cfg.allowLive)
-        self.ib = IB()
+        ib = self._make_ib()
+        token = object()
+        self._ib_token = token
+        # Assign before connect() so a drop during the handshake is this session's.
+        self.ib = ib
+
+        def _from_this_session(*_args: object) -> None:
+            if self._ib_token is not token or self.ib is not ib:
+                return
+            self._on_disconnected()
+
+        def _on_error(
+            req_id: object,
+            error_code: object,
+            error_string: object,
+            contract: object = None,
+            *_args: object,
+        ) -> None:
+            if self._ib_token is not token or self.ib is not ib:
+                return
+            self._on_ib_error(req_id, error_code, error_string, contract)
+
+        ib.disconnectedEvent += _from_this_session
+        ib.errorEvent += _on_error
         Log.info(
             "PAPER ONLY. Connecting %s:%s clientId=%s place_orders=%s dry_run=%s "
             "flipLockBars=%s effective=%s side=%s",
@@ -659,15 +718,15 @@ class PaperLoop:
             self.flip_lock_bars,
             self.cfg.side,
         )
-        self.ib.connect(
+        ib.connect(
             self.cfg.ibHost,
             self.cfg.ibPort,
             clientId=self.cfg.clientId,
             readonly=not self.place_orders,
         )
-        accounts = self.ib.managedAccounts()
+        accounts = ib.managedAccounts()
         Log.info("Managed accounts: %s", accounts)
-        self.contract = qualify_front_mnq(self.ib, self.cfg)
+        self.contract = qualify_front_mnq(ib, self.cfg)
         self.state.contract_local = getattr(self.contract, "localSymbol", "") or ""
         self.state.contract_con_id = int(getattr(self.contract, "conId", 0) or 0)
         Log.info(
@@ -679,6 +738,227 @@ class PaperLoop:
             self.contract.multiplier,
         )
         save_state(self.state)
+        self._session_started = True
+
+    def _on_disconnected(self, *_args: object) -> None:
+        if self._stopping:
+            return
+        if self._reconnecting:
+            # Warmup runs inside the connect attempt. Remember a drop, but do not
+            # start a second reconnect from the event handler.
+            if not self._lost_during_connect:
+                Log.warning("Disconnect detected")
+            self._lost_during_connect = True
+            return
+        self._note_disconnect(None)
+
+    def _on_ib_error(
+        self,
+        req_id: object,
+        error_code: object,
+        error_string: object,
+        contract: object = None,
+        *_args: object,
+    ) -> None:
+        del req_id, contract
+        try:
+            code = int(error_code)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return
+        if code not in _LOST_CONNECTION_CODES:
+            return
+        if self._stopping:
+            return
+        if self._reconnecting:
+            if not self._lost_during_connect:
+                Log.warning("Disconnect detected: IB error %s: %s", code, error_string)
+            self._lost_during_connect = True
+            return
+        self._note_disconnect(f"IB error {code}: {error_string}")
+
+    def _note_disconnect(self, detail: object) -> None:
+        if self._stopping or self._disconnected:
+            return
+        self._disconnected = True
+        if detail is None:
+            Log.warning("Disconnect detected")
+        else:
+            Log.warning("Disconnect detected: %s", detail)
+
+    def _ib_connected(self) -> bool:
+        ib = self.ib
+        if ib is None:
+            return False
+        try:
+            return bool(ib.isConnected())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _connection_failure(self, exc: BaseException) -> bool:
+        return isinstance(exc, (ConnectionError, OSError, TimeoutError))
+
+    def _cancel_stream(self) -> None:
+        bars = self._hist_bars
+        self._hist_bars = None
+        if bars is None:
+            return
+        try:
+            bars.updateEvent -= self._on_bar_update
+        except Exception:  # noqa: BLE001
+            pass
+        ib = self.ib
+        if ib is None:
+            return
+        try:
+            if ib.isConnected():
+                ib.cancelHistoricalData(bars)
+        except Exception:  # noqa: BLE001
+            Log.debug("cancelHistoricalData failed", exc_info=True)
+
+    def _drop_session(self) -> None:
+        """Detach the 1m stream and close the socket before a new connect."""
+        self._cancel_stream()
+        ib = self.ib
+        self.ib = None
+        if ib is None:
+            return
+        try:
+            if ib.isConnected():
+                ib.disconnect()
+        except Exception:  # noqa: BLE001
+            Log.exception("disconnect failed")
+
+    def _restore_runtime_state(self) -> None:
+        """Reload state.json so a bracket and flip locks survive the new session.
+
+        A failed save keeps an in-memory working bracket instead of forgetting it
+        and sending another one.
+        """
+        previous = self.state
+        restored = load_state(self.cfg)
+        if self.place_orders and restored.open is not None and restored.open.simulated:
+            Log.info("Ignoring simulated dry-run position; Paper orders follow the Gateway book")
+            restored.open = None
+        memory_open = previous.open
+        file_open = restored.open
+        if file_open is None and memory_open is not None and not memory_open.simulated:
+            restored.open = memory_open
+        seen = {(lock.exit_ts, lock.stop_side) for lock in restored.flip_locks}
+        for lock in previous.flip_locks:
+            key = (lock.exit_ts, lock.stop_side)
+            if key not in seen:
+                restored.flip_locks.append(lock)
+                seen.add(key)
+        if not restored.contract_local:
+            restored.contract_local = previous.contract_local
+        if not restored.contract_con_id:
+            restored.contract_con_id = previous.contract_con_id
+        self.state = restored
+        open_trade = self.state.open
+        if open_trade is not None and not open_trade.simulated and open_trade.parent_order_id is not None:
+            Log.info(
+                "Restored open bracket side=%s parent=%s tp=%s sl=%s entry_filled=%s; "
+                "not placing a duplicate",
+                open_trade.side,
+                open_trade.parent_order_id,
+                open_trade.tp_order_id,
+                open_trade.sl_order_id,
+                open_trade.entry_filled,
+            )
+
+    def _refresh_open_orders(self) -> None:
+        """Ask Gateway for this clientId's working orders before the next decision."""
+        if not self.place_orders or self.ib is None:
+            return
+        req = getattr(self.ib, "reqOpenOrders", None)
+        if not callable(req):
+            return
+        Log.info("Requesting open orders so an existing bracket is adopted")
+        req()
+
+    def _wait(self, seconds: float) -> None:
+        """Sleep up to `seconds`, returning early on Ctrl+C / SIGTERM or the smoke timeout."""
+        if seconds <= 0:
+            return
+        end = time.monotonic() + seconds
+        while not self._stopping and not self._timed_out():
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.2, remaining))
+
+    def _timed_out(self) -> bool:
+        deadline = self._deadline
+        return deadline is not None and time.monotonic() >= deadline
+
+    def _session_ready(self) -> bool:
+        return (
+            self.ib is not None
+            and self._hist_bars is not None
+            and not self._disconnected
+            and self._ib_connected()
+        )
+
+    def _reconnect_session(self) -> bool:
+        """Connect, restore state.json, and resubscribe. Retry until stop.
+
+        Returns False when Ctrl+C, SIGTERM, or the smoke timeout ends the wait.
+        """
+        self._reconnecting = True
+        try:
+            while not self._stopping:
+                if self._timed_out():
+                    Log.info("Timeout reached — stopping")
+                    self._stopping = True
+                    return False
+                if self._disconnected:
+                    self._reconnect_attempt += 1
+                    delay = reconnect_backoff_seconds(self._reconnect_attempt)
+                    Log.warning(
+                        "Reconnect attempt %s to %s:%s clientId=%s in %ss",
+                        self._reconnect_attempt,
+                        self.cfg.ibHost,
+                        self.cfg.ibPort,
+                        self.cfg.clientId,
+                        delay,
+                    )
+                    self._wait(delay)
+                    if self._stopping:
+                        return False
+                    if self._timed_out():
+                        Log.info("Timeout reached — stopping")
+                        self._stopping = True
+                        return False
+                try:
+                    had_drop = self._disconnected
+                    if had_drop:
+                        try:
+                            save_state(self.state)
+                        except Exception:  # noqa: BLE001
+                            Log.exception("Could not save state before reconnect")
+                    self._drop_session()
+                    self._lost_during_connect = False
+                    self.connect()
+                    if self._lost_during_connect or not self._ib_connected():
+                        raise ConnectionError("Connection lost while starting the session")
+                    self._restore_runtime_state()
+                    self._refresh_open_orders()
+                    self.warmup_and_stream()
+                    if self._lost_during_connect or not self._ib_connected():
+                        raise ConnectionError("Connection lost while starting the session")
+                    if had_drop:
+                        Log.info("Reconnect succeeded")
+                    self._disconnected = False
+                    self._reconnect_attempt = 0
+                    return True
+                except SystemExit:
+                    raise
+                except Exception:  # noqa: BLE001
+                    Log.exception("Connect failed")
+                    self._disconnected = True
+            return False
+        finally:
+            self._reconnecting = False
 
     def warmup_and_stream(self) -> None:
         """Fetch historical 1m once, then keepUpToDate for completed-bar events.
@@ -687,6 +967,7 @@ class PaperLoop:
         Real-time bars from IB are 5-second aggregates; 1-minute keepUpToDate
         matches the backtest bar size and fires hasNewBar on each minute close.
         """
+        self._cancel_stream()
         assert self.ib and self.contract
         duration = "2 D"
         Log.info(
@@ -1245,6 +1526,16 @@ class PaperLoop:
         save_state(self.state)
 
     def _place_bracket(self, sig: Signal, signal_bar_ts: int) -> None:
+        existing = self.state.open
+        if existing is not None and not existing.simulated and existing.parent_order_id is not None:
+            Log.info(
+                "Skip duplicate bracket; state already has open %s parent=%s tp=%s sl=%s",
+                existing.side,
+                existing.parent_order_id,
+                existing.tp_order_id,
+                existing.sl_order_id,
+            )
+            return
         from ib_insync import LimitOrder, StopOrder  # type: ignore
 
         assert self.ib and self.contract
@@ -1451,52 +1742,116 @@ class PaperLoop:
         )
         return True
 
+    def _sync_tick(self) -> None:
+        if not (self.place_orders and self.state.open and not self.state.open.simulated):
+            return
+        try:
+            completed = len(self.bars) - 2 if len(self.bars) >= 2 else None
+            self._sync_position_from_ib(completed)
+            save_state(self.state)
+        except Exception as exc:  # noqa: BLE001
+            if self._connection_failure(exc) or not self._ib_connected():
+                self._note_disconnect(exc)
+                return
+            Log.exception("sync failed")
+
+    def _install_stop_signals(self) -> None:
+        try:
+            self._prev_sigint = signal.getsignal(signal.SIGINT)
+            self._prev_sigterm = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGINT, self._handle_sig)
+            signal.signal(signal.SIGTERM, self._handle_sig)
+        except (ValueError, OSError):
+            Log.warning("Signal handlers not installed (not the main thread)")
+            return
+        self._signals_installed = True
+
+    def _restore_stop_signals(self) -> None:
+        if not self._signals_installed:
+            return
+        signal.signal(signal.SIGINT, self._prev_sigint)
+        signal.signal(signal.SIGTERM, self._prev_sigterm)
+        self._signals_installed = False
+
+    def _handle_sig(self, _signum: int, _frame: Any) -> None:
+        Log.info("Signal received — shutting down")
+        self._stopping = True
+
+    def _shutdown(self) -> None:
+        Log.info("Disconnecting…")
+        self._stopping = True
+        self._reconnecting = True
+        try:
+            self._cancel_stream()
+        except Exception:  # noqa: BLE001
+            Log.exception("cancel stream failed")
+        ib = self.ib
+        if ib is not None:
+            try:
+                if ib.isConnected():
+                    ib.disconnect()
+            except Exception:  # noqa: BLE001
+                Log.exception("disconnect failed")
+        if self._session_started:
+            try:
+                save_state(self.state)
+            except Exception:  # noqa: BLE001
+                Log.exception("save state failed")
+        Log.info("Stopped. state=%s trades=%s", STATE_PATH, TRADES_PATH)
+
     def run_forever(self) -> None:
-        assert self.ib
         Log.info(
             "Loop running. Ctrl+C to stop. dry_run=%s place_orders=%s flipLockBars=%s. Paper only.",
             self.dry_run,
             self.place_orders,
             self.flip_lock_bars,
         )
-
-        def _handle_sig(_signum: int, _frame: Any) -> None:
+        timeout_sec = int(getattr(self, "_timeout_sec", 0) or 0)
+        self._deadline = time.monotonic() + timeout_sec if timeout_sec > 0 else None
+        if timeout_sec > 0:
+            Log.info("Auto-stop in %ss", timeout_sec)
+        self._install_stop_signals()
+        try:
+            while not self._stopping:
+                if self._timed_out():
+                    Log.info("Timeout reached — stopping")
+                    self._stopping = True
+                    break
+                if not self._session_ready():
+                    if not self._reconnect_session():
+                        break
+                    continue
+                try:
+                    self.ib.sleep(1)
+                except KeyboardInterrupt:
+                    Log.info("Signal received — shutting down")
+                    self._stopping = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if self._stopping:
+                        break
+                    if self._connection_failure(exc) or not self._ib_connected():
+                        self._note_disconnect(exc)
+                        continue
+                    raise
+                if self._stopping:
+                    break
+                if self._timed_out():
+                    Log.info("Timeout reached — stopping")
+                    self._stopping = True
+                    break
+                if self._disconnected or not self._ib_connected():
+                    self._note_disconnect(None)
+                    continue
+                self._sync_tick()
+        except KeyboardInterrupt:
             Log.info("Signal received — shutting down")
             self._stopping = True
-
-        signal.signal(signal.SIGINT, _handle_sig)
-        signal.signal(signal.SIGTERM, _handle_sig)
-
-        deadline = None
-        timeout_sec = getattr(self, "_timeout_sec", 0) or 0
-        if timeout_sec > 0:
-            deadline = time.time() + timeout_sec
-            Log.info("Auto-stop in %ss", timeout_sec)
-
-        while not self._stopping:
-            if deadline is not None and time.time() >= deadline:
-                Log.info("Timeout reached — stopping")
-                self._stopping = True
-                break
-            self.ib.sleep(1)
-            # Periodic position sync
-            if self.place_orders and self.state.open and not self.state.open.simulated:
-                try:
-                    completed = len(self.bars) - 2 if len(self.bars) >= 2 else None
-                    self._sync_position_from_ib(completed)
-                    save_state(self.state)
-                except Exception:  # noqa: BLE001
-                    Log.exception("sync failed")
-
-        Log.info("Disconnecting…")
-        try:
-            if self._hist_bars is not None:
-                self.ib.cancelHistoricalData(self._hist_bars)
-        except Exception:  # noqa: BLE001
-            pass
-        self.ib.disconnect()
-        save_state(self.state)
-        Log.info("Stopped. state=%s trades=%s", STATE_PATH, TRADES_PATH)
+        finally:
+            try:
+                self._shutdown()
+            finally:
+                self._restore_stop_signals()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1589,15 +1944,17 @@ def main() -> int:
         loop._on_bar_update = limited  # type: ignore[method-assign]
 
     try:
-        loop.connect()
-        loop.warmup_and_stream()
         loop.run_forever()
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001
         Log.exception("Fatal: %s", exc)
-        if loop.ib and loop.ib.isConnected():
-            loop.ib.disconnect()
+        if loop.ib is not None:
+            try:
+                if loop.ib.isConnected():
+                    loop.ib.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
         return 1
     return 0
 
