@@ -18,6 +18,10 @@ Safety:
   - A working Paper entry stays tracked until the parent fills, the parent is cancelled,
     or that limit expires. An empty positions() snapshot is not a cancel (fills lag it).
   - maxContracts defaults to 1
+  - EMA tighten to 1R revises the working TP limit in place. The modify omits
+    ocaGroup/ocaType (IB error 10326 rejects an OCA revision and leaves the
+    old price). The stop stays in the original OCA group. target/tightened
+    update only after that modify is accepted.
   - Daytime flip lock (default 15): after a full stop, block opposite-side entries
     for the next 15 completed 1m bars. Same side stays allowed. 0 disables.
     Shared by long and short when side=both. Paper sockets only.
@@ -37,6 +41,7 @@ import os
 import signal
 import sys
 import time
+from copy import copy
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -49,6 +54,28 @@ ENTRY_LIMIT_EXPIRY_BARS = 2
 # Dead parent, and only these. "Inactive" is left alone: a bracket can sit there
 # before the transmitting child, and a reject still dies on the entry-limit timer.
 _ENTRY_CANCEL_STATUSES = frozenset({"cancelled", "apicancelled"})
+# A modify that resends ocaGroup/ocaType is an OCA revision. These codes mean
+# IB did not apply the new limit. 2109 is not here: that warning means the
+# price change was processed and the existing OCA group was left alone.
+_TP_MODIFY_REJECT_CODES = frozenset({
+    103,
+    104,
+    105,
+    106,
+    107,
+    109,
+    110,
+    201,
+    202,
+    203,
+    321,
+    10147,
+    10148,
+    10326,
+})
+# Paper Gateway rejects 10326 within a few milliseconds. Wait long enough to
+# see that before recording the 1R target locally.
+_TP_MODIFY_ACK_SEC = 1.0
 PAPER_DIR = Path(__file__).resolve().parent
 if str(PAPER_DIR) not in sys.path:
     sys.path.insert(0, str(PAPER_DIR))
@@ -608,6 +635,7 @@ class PaperLoop:
         self._hist_bars: Any = None
         self._stopping = False
         self._last_processed_ts: Optional[int] = None
+        self._tp_modify_in_progress = False
         self._tick = 0.25
         self.flip_lock_bars = effective_flip_lock_bars(cfg.side, cfg.flipLockBars)
         if self.place_orders and self.state.open is not None and self.state.open.simulated:
@@ -855,8 +883,15 @@ class PaperLoop:
                 self.state.open.target,
                 new_tp,
             )
-            if allow_order and self.place_orders:
-                self._modify_take_profit(new_tp)
+            if self.place_orders and not self._modify_take_profit(new_tp):
+                # IB still has the previous limit. Leaving tightened false
+                # lets a later bar retry. Do not pretend the TP moved.
+                Log.warning(
+                    "TIGHTEN not applied %s IB target stays %.2f",
+                    self.state.open.side,
+                    self.state.open.target,
+                )
+                return
             self.state.open.target = new_tp
             self.state.open.tightened = True
             return
@@ -1321,20 +1356,100 @@ class PaperLoop:
                         Log.exception("cancelOrder failed for %s", oid)
         self.state.open = None
 
-    def _modify_take_profit(self, new_tp: float) -> None:
+    def _modify_take_profit(self, new_tp: float) -> bool:
+        """Revise the working TP limit. True only if IB accepted the new price.
+
+        The live order stays in its OCA group. IB error 10326 rejects the
+        whole modify when the request still carries ocaGroup/ocaType, so the
+        outbound copy omits those fields. TWS keeps the group already on the
+        order, and the stop stays OCO with this limit. The stop is not
+        cancelled; a cancel/replace would have to rejoin that same group.
+        """
         assert self.ib and self.contract and self.state.open
         tp_id = self.state.open.tp_order_id
         if not tp_id:
             Log.warning("No tp_order_id to modify")
-            return
-        # Find open trade for TP
-        for trade in self.ib.openTrades():
-            if trade.order.orderId == tp_id:
-                trade.order.lmtPrice = new_tp
-                self.ib.placeOrder(self.contract, trade.order)
-                Log.info("Modified TP order %s -> %.2f", tp_id, new_tp)
+            return False
+        if self._tp_modify_in_progress:
+            Log.warning("TP modify already in progress for order %s", tp_id)
+            return False
+        trade = None
+        for item in self.ib.openTrades():
+            order = getattr(item, "order", None)
+            if order is not None and getattr(order, "orderId", None) == tp_id:
+                trade = item
+                break
+        if trade is None:
+            Log.warning("TP order %s not found in openTrades — may already filled", tp_id)
+            return False
+
+        order = trade.order
+        prev_group = str(getattr(order, "ocaGroup", "") or "")
+        rejects: list[tuple[int, str]] = []
+
+        def _on_error(*args: Any) -> None:
+            if len(args) < 3:
                 return
-        Log.warning("TP order %s not found in openTrades — may already filled", tp_id)
+            try:
+                req_id = int(args[0])
+                code = int(args[1])
+            except (TypeError, ValueError):
+                return
+            if req_id != int(tp_id) or code not in _TP_MODIFY_REJECT_CODES:
+                return
+            rejects.append((code, str(args[2])))
+
+        # Copy so the working order keeps its OCA group if the send fails,
+        # and so placeOrder cannot revise that group. Same orderId → modify.
+        outbound = copy(order)
+        outbound.lmtPrice = float(new_tp)
+        outbound.ocaGroup = ""
+        outbound.ocaType = 0
+        outbound.transmit = True
+
+        error_event = getattr(self.ib, "errorEvent", None)
+        subscribed = False
+        self._tp_modify_in_progress = True
+        sent = False
+        try:
+            if error_event is not None:
+                error_event += _on_error
+                subscribed = True
+            self.ib.placeOrder(self.contract, outbound)
+            sent = True
+            waiter = getattr(self.ib, "sleep", None)
+            if callable(waiter):
+                waiter(_TP_MODIFY_ACK_SEC)
+        except Exception:
+            if not sent:
+                Log.exception("TP modify failed for order %s", tp_id)
+                return False
+            Log.exception("TP modify for order %s was sent; ack wait failed", tp_id)
+        finally:
+            self._tp_modify_in_progress = False
+            if subscribed and error_event is not None:
+                error_event -= _on_error
+
+        if not sent:
+            return False
+        if rejects:
+            code, text = rejects[0]
+            Log.error(
+                "TP modify rejected orderId=%s code=%s %s — limit stays %.2f",
+                tp_id,
+                code,
+                text,
+                order.lmtPrice,
+            )
+            return False
+        order.lmtPrice = float(new_tp)
+        Log.info(
+            "Modified TP order %s -> %.2f (OCA omitted on modify; group %s kept)",
+            tp_id,
+            new_tp,
+            prev_group or "-",
+        )
+        return True
 
     def run_forever(self) -> None:
         assert self.ib
