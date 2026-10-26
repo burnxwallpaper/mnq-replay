@@ -4,6 +4,20 @@ import type { OhlcvBar } from "@/lib/strategies/types";
 export const STRATEGY_STORAGE_KEY = "mnq-replay.strategyScript";
 export const ENTRY_FILTERS_STORAGE_KEY = "mnq-replay.entryFilters";
 export const ROUND_TRIP_FEE_STORAGE_KEY = "mnq-replay.roundTripFeeUsd";
+export const FLIP_LOCK_BARS_STORAGE_KEY = "mnq-replay.flipLockBars";
+
+/**
+ * After a full stop, block new opposite-side entries for this many 1m bars.
+ * 0 turns the lock off. Daytime combined long+short uses this by default.
+ * Eve and single-side runs do not.
+ */
+export const DEFAULT_FLIP_LOCK_BARS = 15;
+
+export function normalizeFlipLockBars(raw: unknown, fallback = DEFAULT_FLIP_LOCK_BARS): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.min(5000, Math.round(n));
+}
 
 /** USD charged once when a trade closes (full round-trip). */
 export const DEFAULT_ROUND_TRIP_FEE_USD = 1.6;
@@ -442,30 +456,79 @@ export type RunStrategyOptions = {
    * Default `ENTRY_LIMIT_EXPIRY_BARS` (2) matches paper.
    */
   entryLimitExpiryBars?: number;
+  /**
+   * After a closed trade exits on a full stop at bar E, reject new entries on the
+   * opposite side whose signal bar is in E+1 .. E+flipLockBars (inclusive).
+   * Same-side entries stay allowed. A pending limit whose signal bar is already
+   * accepted can still fill inside the window. `0` disables.
+   * Omitted on `runStrategyScript` means off, so a single leg cannot see the other side.
+   * Omitted on `runLinkedStrategyScripts` means `DEFAULT_FLIP_LOCK_BARS` (15).
+   */
+  flipLockBars?: number;
 };
 
-export function runStrategyScript(
-  bars: OhlcvBar[],
-  source: string,
-  strategyId = "script",
-  options: RunStrategyOptions = {},
-): ScriptRun {
-  const expiryBars =
-    options.entryLimitExpiryBars === undefined
-      ? ENTRY_LIMIT_EXPIRY_BARS
-      : options.entryLimitExpiryBars;
-  const instantFill = expiryBars <= 0;
+type PendingEntry = {
+  side: "long" | "short";
+  stop: number;
+  target: number;
+  risk: number;
+  limit: number;
+  signalIndex: number;
+  barsWaited: number;
+};
 
-  let fn: BarFn;
-  try {
-    fn = compile(source);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Script failed to compile.";
-    return { ok: false, error: message, markers: [], trades: [] };
+type FlipLock = {
+  /** Stop exit bar. A signal on this same bar is still allowed. */
+  fromBar: number;
+  /** Last blocked signal bar: exitIndex + flipLockBars. */
+  untilBar: number;
+  stopSide: "long" | "short";
+};
+
+type StrategyLeg = {
+  id: string;
+  fn: BarFn;
+  ta: {
+    sma: (index: number, length: number, field: Field) => number;
+    ema: (index: number, length: number, field: Field) => number;
+  };
+  markers: ScriptMarker[];
+  trades: ScriptTrade[];
+  open: ScriptTrade | null;
+  pending: PendingEntry | null;
+};
+
+function noteStopFlipLock(
+  locks: FlipLock[],
+  flipLockBars: number,
+  exitIndex: number,
+  stopSide: "long" | "short",
+  reason: "stop" | "target",
+) {
+  if (flipLockBars <= 0 || reason !== "stop") return;
+  locks.push({
+    fromBar: exitIndex,
+    untilBar: exitIndex + flipLockBars,
+    stopSide,
+  });
+}
+
+/** True when `signalIndex` is strictly after a stop and still inside that lock. */
+function isOppositeFlipLocked(
+  locks: FlipLock[],
+  side: "long" | "short",
+  signalIndex: number,
+): boolean {
+  for (const lock of locks) {
+    if (signalIndex <= lock.fromBar) continue;
+    if (signalIndex > lock.untilBar) continue;
+    if (side !== lock.stopSide) return true;
   }
+  return false;
+}
 
-  const emaCache = new Map<string, (number | null)[]>();
-  const ta = {
+function makeTa(bars: OhlcvBar[], emaCache: Map<string, (number | null)[]>): StrategyLeg["ta"] {
+  return {
     sma(index: number, length: number, field: Field) {
       if (!isField(field) || length < 1) return 0;
       const start = Math.max(0, index - Math.floor(length) + 1);
@@ -492,28 +555,87 @@ export function runStrategyScript(
       return series[index] ?? 0;
     },
   };
+}
 
-  const markers: ScriptMarker[] = [];
-  const trades: ScriptTrade[] = [];
-  let open: ScriptTrade | null = null;
-  type PendingEntry = {
-    side: "long" | "short";
-    stop: number;
-    target: number;
-    risk: number;
-    limit: number;
-    signalIndex: number;
-    barsWaited: number;
+export type LinkedStrategySpec = {
+  id: string;
+  source: string;
+};
+
+export type LinkedStrategyRun =
+  | { ok: true; runs: { id: string; run: ScriptRun }[] }
+  | { ok: false; error: string };
+
+/**
+ * Run one or more scripts on the same bars with one shared flip lock.
+ * Long and short daytime legs must go through here together; separate
+ * `runStrategyScript` calls cannot see each other's stops.
+ */
+export function runLinkedStrategyScripts(
+  bars: OhlcvBar[],
+  specs: LinkedStrategySpec[],
+  options: RunStrategyOptions = {},
+): LinkedStrategyRun {
+  const expiryBars =
+    options.entryLimitExpiryBars === undefined
+      ? ENTRY_LIMIT_EXPIRY_BARS
+      : options.entryLimitExpiryBars;
+  const instantFill = expiryBars <= 0;
+  const flipLockBars =
+    options.flipLockBars === undefined
+      ? DEFAULT_FLIP_LOCK_BARS
+      : normalizeFlipLockBars(options.flipLockBars, 0);
+
+  const legs: StrategyLeg[] = [];
+  for (const spec of specs) {
+    try {
+      legs.push({
+        id: spec.id,
+        fn: compile(spec.source),
+        ta: makeTa(bars, new Map()),
+        markers: [],
+        trades: [],
+        open: null,
+        pending: null,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Script failed to compile.";
+      return { ok: false, error: `${spec.id}: ${message}` };
+    }
+  }
+
+  const locks: FlipLock[] = [];
+
+  const pushExit = (
+    leg: StrategyLeg,
+    pos: ScriptTrade,
+    i: number,
+    exit: { price: number; reason: "stop" | "target" },
+  ) => {
+    pos.exitIndex = i;
+    pos.exitReason = exit.reason;
+    pos.exitPrice = exit.price;
+    leg.markers.push({
+      strategyId: leg.id,
+      barIndex: i,
+      visibleFromIndex: i,
+      kind: "exit",
+      win: exit.reason === "target",
+      price: exit.price,
+      side: pos.side,
+    });
+    leg.trades.push(pos);
+    noteStopFlipLock(locks, flipLockBars, i, pos.side, exit.reason);
   };
-  let pending: PendingEntry | null = null;
 
   const makeOpen = (
+    leg: StrategyLeg,
     i: number,
     fillPrice: number,
     from: { side: "long" | "short"; stop: number; target: number; risk: number; signalIndex: number },
   ): ScriptTrade => {
-    markers.push({
-      strategyId,
+    leg.markers.push({
+      strategyId: leg.id,
       barIndex: i,
       visibleFromIndex: i,
       kind: "entry",
@@ -522,7 +644,7 @@ export function runStrategyScript(
       side: from.side,
     });
     return {
-      strategyId,
+      strategyId: leg.id,
       side: from.side,
       signalIndex: from.signalIndex,
       entryIndex: i,
@@ -538,128 +660,134 @@ export function runStrategyScript(
 
   for (let i = 0; i < bars.length; i += 1) {
     const bar = bars[i];
-    if (open !== null) {
-      const pos = open;
-      const stopped =
-        pos.side === "long" ? bar.l <= pos.stopPrice : bar.h >= pos.stopPrice;
-      const targeted =
-        pos.side === "long" ? bar.h >= pos.targetPrice : bar.l <= pos.targetPrice;
-      if (!stopped && !targeted) {
-        let managed: unknown;
-        try {
-          managed = fn(bar, i, bars, ta, {
-            side: pos.side,
-            entry: pos.entryPrice,
-            stop: pos.stopPrice,
-            target: pos.targetPrice,
-            risk: pos.riskPoints,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Script threw.";
-          return { ok: false, error: `Bar ${i + 1}: ${message}`, markers: [], trades: [] };
+    for (const leg of legs) {
+      if (leg.open !== null) {
+        const pos = leg.open;
+        const stopped = pos.side === "long" ? bar.l <= pos.stopPrice : bar.h >= pos.stopPrice;
+        const targeted = pos.side === "long" ? bar.h >= pos.targetPrice : bar.l <= pos.targetPrice;
+        if (!stopped && !targeted) {
+          let managed: unknown;
+          try {
+            managed = leg.fn(bar, i, bars, leg.ta, {
+              side: pos.side,
+              entry: pos.entryPrice,
+              stop: pos.stopPrice,
+              target: pos.targetPrice,
+              risk: pos.riskPoints,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Script threw.";
+            return { ok: false, error: `${leg.id}: Bar ${i + 1}: ${message}` };
+          }
+          const nextTarget = readTarget(managed);
+          if (nextTarget !== null) pos.targetPrice = nextTarget;
         }
-        const nextTarget = readTarget(managed);
-        if (nextTarget !== null) pos.targetPrice = nextTarget;
-      }
-      const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
-      if (exit) {
-        pos.exitIndex = i;
-        pos.exitReason = exit.reason;
-        pos.exitPrice = exit.price;
-        markers.push({
-          strategyId,
-          barIndex: i,
-          visibleFromIndex: i,
-          kind: "exit",
-          win: exit.reason === "target",
-          price: exit.price,
-          side: pos.side,
-        });
-        trades.push(pos);
-        open = null;
-      }
-      continue;
-    }
-
-    if (pending !== null) {
-      const fill = resolveEntryLimitFill(bar, pending.side, pending.limit, pending.stop);
-      if (fill !== null) {
-        const pos = makeOpen(i, fill, pending);
-        pending = null;
         const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
         if (exit) {
-          pos.exitIndex = i;
-          pos.exitReason = exit.reason;
-          pos.exitPrice = exit.price;
-          markers.push({
-            strategyId,
-            barIndex: i,
-            visibleFromIndex: i,
-            kind: "exit",
-            win: exit.reason === "target",
-            price: exit.price,
-            side: pos.side,
-          });
-          trades.push(pos);
-          open = null;
-        } else {
-          open = pos;
+          pushExit(leg, pos, i, exit);
+          leg.open = null;
         }
         continue;
       }
-      pending.barsWaited += 1;
-      if (pending.barsWaited >= expiryBars) {
-        pending = null;
-      }
-      continue;
-    }
 
-    let result: unknown;
-    try {
-      result = fn(bar, i, bars, ta, null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Script threw.";
-      return { ok: false, error: `Bar ${i + 1}: ${message}`, markers: [], trades: [] };
-    }
-    const signal = readSignal(result);
-    if (!signal) continue;
-    const limit = bar.c;
-    const stopDistance = Math.max(Math.abs(limit - signal.stop), 0.25);
-    // Asym stops pass risk1 explicitly so 2.5R, EMA→1R, and Avg RR use it.
-    // Daytime scripts omit risk, so R stays the distance from the close to the stop.
-    const risk = signal.risk ?? stopDistance;
-    markers.push({
-      strategyId,
-      barIndex: i,
-      visibleFromIndex: i,
-      kind: "signal",
-      win: null,
-      price: null,
-      side: signal.side,
-    });
-    if (instantFill) {
-      open = makeOpen(i, limit, {
+      if (leg.pending !== null) {
+        const pending = leg.pending;
+        const fill = resolveEntryLimitFill(bar, pending.side, pending.limit, pending.stop);
+        if (fill !== null) {
+          const pos = makeOpen(leg, i, fill, pending);
+          leg.pending = null;
+          const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
+          if (exit) {
+            pushExit(leg, pos, i, exit);
+          } else {
+            leg.open = pos;
+          }
+          continue;
+        }
+        pending.barsWaited += 1;
+        if (pending.barsWaited >= expiryBars) {
+          leg.pending = null;
+        }
+        continue;
+      }
+
+      let result: unknown;
+      try {
+        result = leg.fn(bar, i, bars, leg.ta, null);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Script threw.";
+        return { ok: false, error: `${leg.id}: Bar ${i + 1}: ${message}` };
+      }
+      const signal = readSignal(result);
+      if (!signal) continue;
+      if (isOppositeFlipLocked(locks, signal.side, i)) continue;
+      const limit = bar.c;
+      const stopDistance = Math.max(Math.abs(limit - signal.stop), 0.25);
+      // Asym stops pass risk1 explicitly so 2.5R, EMA→1R, and Avg RR use it.
+      // Daytime scripts omit risk, so R stays the distance from the close to the stop.
+      const risk = signal.risk ?? stopDistance;
+      leg.markers.push({
+        strategyId: leg.id,
+        barIndex: i,
+        visibleFromIndex: i,
+        kind: "signal",
+        win: null,
+        price: null,
+        side: signal.side,
+      });
+      if (instantFill) {
+        leg.open = makeOpen(leg, i, limit, {
+          side: signal.side,
+          stop: signal.stop,
+          target: signal.target,
+          risk,
+          signalIndex: i,
+        });
+        continue;
+      }
+      leg.pending = {
         side: signal.side,
         stop: signal.stop,
         target: signal.target,
         risk,
+        limit,
         signalIndex: i,
-      });
-      continue;
+        barsWaited: 0,
+      };
     }
-    pending = {
-      side: signal.side,
-      stop: signal.stop,
-      target: signal.target,
-      risk,
-      limit,
-      signalIndex: i,
-      barsWaited: 0,
-    };
   }
 
-  if (open) trades.push(open);
-  return { ok: true, markers, trades };
+  for (const leg of legs) {
+    if (leg.open) leg.trades.push(leg.open);
+  }
+
+  return {
+    ok: true,
+    runs: legs.map((leg) => ({
+      id: leg.id,
+      run: { ok: true as const, markers: leg.markers, trades: leg.trades },
+    })),
+  };
+}
+
+export function runStrategyScript(
+  bars: OhlcvBar[],
+  source: string,
+  strategyId = "script",
+  options: RunStrategyOptions = {},
+): ScriptRun {
+  const linked = runLinkedStrategyScripts(bars, [{ id: strategyId, source }], {
+    ...options,
+    // A lone script has no other side to lock. Callers that want the shared
+    // daytime lock use runLinkedStrategyScripts (default 15).
+    flipLockBars: options.flipLockBars ?? 0,
+  });
+  if (!linked.ok) {
+    const prefix = `${strategyId}: `;
+    const error = linked.error.startsWith(prefix) ? linked.error.slice(prefix.length) : linked.error;
+    return { ok: false, error, markers: [], trades: [] };
+  }
+  return linked.runs[0]?.run ?? { ok: true, markers: [], trades: [] };
 }
 
 export const MNQ_POINT_VALUE = 2;

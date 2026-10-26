@@ -18,11 +18,13 @@ import {
 import { EntryFiltersPanel } from "@/components/entry-filters";
 import {
   DEFAULT_ENTRY_FILTERS,
+  DEFAULT_FLIP_LOCK_BARS,
   DEFAULT_ROUND_TRIP_FEE_USD,
   ENTRY_FILTERS_STORAGE_KEY,
   EVE_ENTRY_FILTERS,
   EVE_LONG_STRATEGY_SCRIPT,
   EVE_SHORT_STRATEGY_SCRIPT,
+  FLIP_LOCK_BARS_STORAGE_KEY,
   ROUND_TRIP_FEE_STORAGE_KEY,
   STRATEGY_COLORS,
   STRATEGY_PRESETS,
@@ -31,8 +33,10 @@ import {
   buildShortStrategyScript,
   mergeScriptRuns,
   normalizeEntryFilters,
+  normalizeFlipLockBars,
   normalizeRoundTripFee,
   normalizeStrategyPreset,
+  runLinkedStrategyScripts,
   runStrategyScript,
   scoreScript,
   summarizeMultiBacktest,
@@ -122,6 +126,27 @@ function writeRoundTripFee(feeUsd: number) {
   }
 }
 
+function readFlipLockBars(): number {
+  try {
+    const raw = window.localStorage.getItem(FLIP_LOCK_BARS_STORAGE_KEY);
+    if (raw === null) return DEFAULT_FLIP_LOCK_BARS;
+    return normalizeFlipLockBars(JSON.parse(raw));
+  } catch {
+    return DEFAULT_FLIP_LOCK_BARS;
+  }
+}
+
+function writeFlipLockBars(bars: number) {
+  try {
+    window.localStorage.setItem(
+      FLIP_LOCK_BARS_STORAGE_KEY,
+      JSON.stringify(normalizeFlipLockBars(bars)),
+    );
+  } catch {
+    // Ignore private-mode storage failures.
+  }
+}
+
 function readStrategyPreset(): StrategyPresetId {
   try {
     return normalizeStrategyPreset(window.localStorage.getItem(STRATEGY_PRESET_STORAGE_KEY));
@@ -171,6 +196,7 @@ export function ReplayWorkspace() {
   const [fitRevision, setFitRevision] = useState(0);
   const [entryFilters, setEntryFilters] = useState<EntryFilters>(DEFAULT_ENTRY_FILTERS);
   const [roundTripFeeUsd, setRoundTripFeeUsd] = useState(DEFAULT_ROUND_TRIP_FEE_USD);
+  const [flipLockBars, setFlipLockBars] = useState(DEFAULT_FLIP_LOCK_BARS);
   const [filtersEpoch, setFiltersEpoch] = useState(0);
   const [showPriceChart, setShowPriceChart] = useState(false);
   const [presetId, setPresetId] = useState<StrategyPresetId>("day");
@@ -194,6 +220,7 @@ export function ReplayWorkspace() {
       setEntryFilters(readEntryFilters());
     }
     setRoundTripFeeUsd(readRoundTripFee());
+    setFlipLockBars(readFlipLockBars());
     setShowPriceChart(readShowPriceChart());
     priceChartHydratedRef.current = true;
     setSettingsHydrated(true);
@@ -223,6 +250,11 @@ export function ReplayWorkspace() {
     if (!settingsHydrated) return;
     writeRoundTripFee(roundTripFeeUsd);
   }, [roundTripFeeUsd, settingsHydrated]);
+
+  useEffect(() => {
+    if (!settingsHydrated) return;
+    writeFlipLockBars(flipLockBars);
+  }, [flipLockBars, settingsHydrated]);
 
   useEffect(() => {
     let cancelled = false;
@@ -295,6 +327,7 @@ export function ReplayWorkspace() {
     setLongEnabled(saved.long);
     setShortEnabled(saved.short);
     setEntryFilters(readEntryFilters());
+    setFlipLockBars(readFlipLockBars());
   }
 
   function scrub(next: number) {
@@ -311,6 +344,33 @@ export function ReplayWorkspace() {
     if (!bars) return [];
     const list: NamedScriptRun[] = [];
     const eve = presetId === "eve";
+    // Daytime long+short share one flip lock. Eve stays on two independent runs.
+    if (!eve && longEnabled && shortEnabled && longSource) {
+      const linked = runLinkedStrategyScripts(
+        bars,
+        [
+          { id: "long", source: longSource },
+          { id: "short", source: buildShortStrategyScript(entryFilters) },
+        ],
+        { flipLockBars },
+      );
+      if (!linked.ok) {
+        return [
+          {
+            id: "long",
+            name: "Long strategy",
+            color: STRATEGY_COLORS.long,
+            run: { ok: false, error: linked.error, markers: [], trades: [] },
+          },
+        ];
+      }
+      return linked.runs.map((item) => ({
+        id: item.id,
+        name: item.id === "short" ? "Short strategy" : "Long strategy",
+        color: item.id === "short" ? STRATEGY_COLORS.short : STRATEGY_COLORS.long,
+        run: item.run,
+      }));
+    }
     if (longEnabled) {
       const eveSource =
         longSource && longSource.includes("PRESET=eve-2030-2359")
@@ -341,7 +401,7 @@ export function ReplayWorkspace() {
       });
     }
     return list;
-  }, [bars, longEnabled, shortEnabled, longRun, longSource, entryFilters, presetId]);
+  }, [bars, longEnabled, shortEnabled, longRun, longSource, entryFilters, presetId, flipLockBars]);
 
   const mergedRun = useMemo(() => {
     if (namedRuns.length === 0) return null;
@@ -496,7 +556,7 @@ export function ReplayWorkspace() {
         <p id="strategy-runners-help" className="text-xs text-muted-foreground">
           {presetId === "eve"
             ? "Eve candidate: CT 20:30–23:59 only, vstrict 0.7/6/20×2.2, stop 2× risk1, target and EMA→1R still use risk1. Combined long+short. Daytime stays the default when you switch back."
-            : "Daytime default: CT 09:00–20:29, Fri no new entries from 14:45, filters 0.45/2/15×1.2, stop at the bar extreme. Long = long only · Short = short only · check both to compare."}
+            : `Daytime default: CT 09:00–20:29, Fri no new entries from 14:45, filters 0.45/2/15×1.2, stop at the bar extreme, flip lock ${flipLockBars} (after a full stop, no new opposite-side entry for the next ${flipLockBars} 1m bars; 0 = off, Save to apply). Long and Short share that lock when both are checked.`}
         </p>
         {presetId === "eve" ? (
           <p id="strategy-preset-note" className="text-xs text-muted-foreground">
@@ -512,11 +572,15 @@ export function ReplayWorkspace() {
       <EntryFiltersPanel
         value={entryFilters}
         feeUsd={roundTripFeeUsd}
+        flipLockBars={flipLockBars}
         locked={presetId === "eve"}
-        lockedNote="Eve preset bakes vstrict 0.7 / 6 / SMA(20) × 2.2 into both scripts. Switch to Daytime to edit the default filters. Round-trip fee still applies."
+        lockedNote="Eve preset bakes vstrict 0.7 / 6 / SMA(20) × 2.2 into both scripts and does not use the daytime flip lock. Switch to Daytime to edit filters and flip lock. Round-trip fee still applies."
         onChange={(next) => {
           setEntryFilters(normalizeEntryFilters(next.filters));
           setRoundTripFeeUsd(normalizeRoundTripFee(next.roundTripFeeUsd));
+          if (next.flipLockBars !== undefined) {
+            setFlipLockBars(normalizeFlipLockBars(next.flipLockBars));
+          }
           setFiltersEpoch((n) => n + 1);
           setFitRevision((current) => current + 1);
         }}
@@ -705,7 +769,9 @@ export function ReplayWorkspace() {
         The Preset menu chooses Daytime (default) or the parked Eve candidate. Check Long
         and/or Short above the chart to run them. The editor edits the Long leg; Short follows
         the active preset. Equity shows one line per strategy plus Combined when both are on.
-        Replay only moves the cursor. The paper/IB loop keeps the daytime default.
+        Daytime flip lock (default 15 one-minute bars, 0 = off) blocks a new opposite-side
+        entry after a full stop, and only while both runners are on. Replay only moves the
+        cursor. The paper/IB loop still uses the daytime session and filters without this lock.
       </p>
     </main>
   );

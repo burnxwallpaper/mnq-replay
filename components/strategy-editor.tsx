@@ -202,7 +202,7 @@ export function StrategyEditor({
           <p className="max-w-3xl text-xs text-muted-foreground">
             {presetId === "eve"
               ? "Long leg of the Eve preset. Short uses the matching Eve script while this preset is selected. Apply updates the Long leg only. Reload the preset to restore both. Eve is not written over the saved Daytime script in "
-              : "Edits only the Long strategy (long trades). Short strategy is separate — toggle it above; it uses the built-in daytime short sample. Apply updates the Long runner. Edits stay in localStorage under "}
+              : "Edits only the Long strategy (long trades). Short strategy is separate — toggle it above; it uses the built-in daytime short sample. Apply updates the Long runner. With both checked, the chart uses one shared flip lock (Entry filters, default 15 bars after a stop, 0 = off). Edits stay in localStorage under "}
             {STRATEGY_STORAGE_KEY}.
           </p>
         </div>
