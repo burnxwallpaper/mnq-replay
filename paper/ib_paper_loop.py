@@ -15,6 +15,8 @@ Safety:
   - --dry-run (default): log signals, no orders
   - --place-orders: submit Paper limit + bracket (still refuses live ports)
   - Unfilled entry limit expires after ENTRY_LIMIT_EXPIRY_BARS completed 1m bars (default 2)
+  - A working Paper entry stays tracked until the parent fills, the parent is cancelled,
+    or that limit expires. An empty positions() snapshot is not a cancel (fills lag it).
   - maxContracts defaults to 1
   - Daytime flip lock (default 15): after a full stop, block opposite-side entries
     for the next 15 completed 1m bars. Same side stays allowed. 0 disables.
@@ -44,6 +46,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 LIVE_PORTS = {7496, 4001}
 # Unfilled entry Limit: cancel after this many *completed* 1m bars after the signal bar.
 ENTRY_LIMIT_EXPIRY_BARS = 2
+# Dead parent, and only these. "Inactive" is left alone: a bracket can sit there
+# before the transmitting child, and a reject still dies on the entry-limit timer.
+_ENTRY_CANCEL_STATUSES = frozenset({"cancelled", "apicancelled"})
 PAPER_DIR = Path(__file__).resolve().parent
 if str(PAPER_DIR) not in sys.path:
     sys.path.insert(0, str(PAPER_DIR))
@@ -189,6 +194,9 @@ class OpenTrade:
     signal_bar_ts: int = 0  # completed bar that generated the signal
     bars_waited: int = 0  # completed bars after signal while still unfilled
     simulated: bool = False  # dry-run virtual book; never an IB order
+    # True only after positions() has shown this side. Order-status fills can
+    # arrive while that snapshot is still flat; flat + not seen is not an exit.
+    position_seen: bool = False
 
 
 @dataclass
@@ -230,6 +238,12 @@ def load_state(cfg: Config) -> RuntimeState:
             signal_bar_ts=int(open_raw.get("signal_bar_ts", 0) or 0),
             bars_waited=int(open_raw.get("bars_waited", 0) or 0),
             simulated=bool(open_raw.get("simulated", False)),
+            # Older files set entry_filled only after positions() showed the side.
+            position_seen=(
+                bool(open_raw["position_seen"])
+                if "position_seen" in open_raw
+                else bool(open_raw.get("entry_filled", False))
+            ),
         )
     locks: list[TsFlipLock] = []
     for item in raw.get("flip_locks") or []:
@@ -971,16 +985,19 @@ class PaperLoop:
                 total += float(p.position)
         return total
 
-    def _order_fill(self, order_id: Optional[int]) -> tuple[bool, Optional[float], Optional[int]]:
-        """Return filled, price, and fill time (ms) for one order id."""
+    def _order_view(self, order_id: Optional[int]) -> tuple[str, bool, Optional[float], Optional[int]]:
+        """Return status, filled, price, and fill time (ms). Status is '' if unknown."""
         if not self.ib or order_id is None:
-            return False, None, None
+            return "", False, None, None
         for trade in self.ib.trades():
-            if trade.order.orderId != order_id:
+            order = getattr(trade, "order", None)
+            if order is None or getattr(order, "orderId", None) != order_id:
                 continue
             fills = list(getattr(trade, "fills", []) or [])
-            status = str(getattr(trade.orderStatus, "status", "") or "")
-            filled = status.lower() == "filled" or bool(fills)
+            status_obj = getattr(trade, "orderStatus", None)
+            status = str(getattr(status_obj, "status", "") or "")
+            filled_qty = float(getattr(status_obj, "filled", 0) or 0)
+            filled = status.lower() == "filled" or filled_qty > 0 or bool(fills)
             price: Optional[float] = None
             ts_ms: Optional[int] = None
             if fills:
@@ -995,77 +1012,140 @@ class PaperLoop:
                         dt = dt.replace(tzinfo=UTC)
                     ts_ms = int(dt.timestamp() * 1000)
             if price is None and filled:
-                avg = float(getattr(trade.orderStatus, "avgFillPrice", 0) or 0)
+                avg = float(getattr(status_obj, "avgFillPrice", 0) or 0)
                 if avg:
                     price = avg
-            return filled, price, ts_ms
-        return False, None, None
+            return status, filled, price, ts_ms
+        return "", False, None, None
+
+    def _note_entry_fill(self, price: Optional[float], ts_ms: Optional[int], qty: float) -> None:
+        ot = self.state.open
+        if ot is None or ot.entry_filled:
+            return
+        ot.entry_filled = True
+        if price:
+            ot.entry = price
+        if ts_ms:
+            ot.entry_ts = ts_ms
+        Log.info(
+            "ENTRY fill %s @ %.2f parent=%s (order status; position qty=%s)",
+            ot.side,
+            ot.entry,
+            ot.parent_order_id,
+            qty,
+        )
 
     def _sync_position_from_ib(self, completed_index: Optional[int] = None) -> None:
-        """If brackets filled / stopped, clear local open and log trade."""
+        """Track a Paper bracket until it fills, is cancelled, or the entry limit expires.
+
+        positions() is often still flat in the second we place, and again for a moment
+        after the parent fills. Dropping local state there skips the later stop, so
+        flip lock never arms. Entry fills come from the parent order as well as the
+        position. A stop or target fill is booked even when the snapshot never showed
+        the size.
+        """
         if not self.state.open or self.state.open.simulated:
             return
+        ot = self.state.open
         qty = self._ib_position_qty()
-        # Still holding
-        if (self.state.open.side == "long" and qty > 0) or (
-            self.state.open.side == "short" and qty < 0
-        ):
-            self.state.open.entry_filled = True
+        holding = (ot.side == "long" and qty > 0) or (ot.side == "short" and qty < 0)
+        parent_status, parent_filled, parent_px, parent_ts = self._order_view(ot.parent_order_id)
+        if parent_filled:
+            self._note_entry_fill(parent_px, parent_ts, qty)
+        if holding:
+            if not ot.entry_filled:
+                ot.entry_filled = True
+                Log.info("ENTRY fill %s from IB position qty=%s", ot.side, qty)
+            ot.position_seen = True
             return
-        # Flat while we thought open → closed (or entry never filled / cancelled)
-        if abs(qty) < 1e-9 and self.state.open.entry_filled:
-            sl_filled, sl_px, sl_ts = self._order_fill(self.state.open.sl_order_id)
-            tp_filled, tp_px, tp_ts = self._order_fill(self.state.open.tp_order_id)
-            reason = exit_reason_from_order_fills(sl_filled, tp_filled)
-            if reason == "stop":
-                exit_px = self.state.open.stop if sl_px is None else sl_px
-                fill_ts = sl_ts
-            elif reason == "target":
-                exit_px = self.state.open.target if tp_px is None else tp_px
-                fill_ts = tp_ts
-            else:
-                exit_px = self.bars[-1].c if self.bars else self.state.open.entry
-                fill_ts = None
-                # Order status can lag the position. A bar that traded the stop still arms the lock.
-                candidates: list[Bar] = []
-                if completed_index is not None and 0 <= completed_index < len(self.bars):
-                    candidates.append(self.bars[completed_index])
-                if self.bars:
-                    candidates.append(self.bars[-1])
-                seen_ts: set[int] = set()
-                for candidate in candidates:
-                    if candidate.ts in seen_ts:
-                        continue
-                    seen_ts.add(candidate.ts)
-                    ohlc = resolve_exit_fill(
-                        candidate,
-                        self.state.open.side,
-                        self.state.open.stop,
-                        self.state.open.target,
-                    )
-                    if ohlc is None:
-                        continue
-                    exit_px, reason = ohlc
-                    fill_ts = candidate.ts
-                    Log.info("IB flat; bar OHLC exit %s @ %.2f", reason, exit_px)
-                    break
-                if reason is None:
-                    Log.info("IB flat without a stop or target — flip lock not armed")
-            if fill_ts is not None and self.bars:
-                covered = bar_covering_ts(self.bars, fill_ts)
-                exit_ts = int(covered.ts) if covered is not None else int(fill_ts)
-            elif completed_index is not None and 0 <= completed_index < len(self.bars):
-                exit_ts = self.bars[completed_index].ts
-            elif self.bars:
-                exit_ts = self.bars[-1].ts
-            else:
-                exit_ts = int(time.time() * 1000)
-            Log.info("Position flat on IB — booking close (%s)", reason or "manual")
-            self._book_close(exit_px, exit_ts, reason or "manual", note="IB flat detect")
-        elif abs(qty) < 1e-9 and not self.state.open.entry_filled:
-            # Check if parent cancelled / expired without fill
-            Log.info("No position and entry not filled — clearing local open state")
-            self.state.open = None
+        if abs(qty) >= 1e-9:
+            # Opposite or unexpected size. Keep the bracket; do not forget it.
+            return
+
+        _sl_status, sl_filled, sl_px, sl_ts = self._order_view(ot.sl_order_id)
+        _tp_status, tp_filled, tp_px, tp_ts = self._order_view(ot.tp_order_id)
+        reason = exit_reason_from_order_fills(sl_filled, tp_filled)
+        if reason == "stop":
+            self._note_entry_fill(parent_px, parent_ts, qty)
+            self._book_ib_exit("stop", sl_px, sl_ts, completed_index)
+            return
+        if reason == "target":
+            self._note_entry_fill(parent_px, parent_ts, qty)
+            self._book_ib_exit("target", tp_px, tp_ts, completed_index)
+            return
+
+        if not ot.entry_filled:
+            if parent_status.lower() in _ENTRY_CANCEL_STATUSES:
+                Log.info(
+                    "Entry parent %s %s and no position — clearing local open state",
+                    ot.parent_order_id,
+                    parent_status,
+                )
+                self.state.open = None
+                return
+            # Resting, inactive, or not in trades() yet. Expiry cancels a still-working limit.
+            return
+
+        if not ot.position_seen and parent_status != "":
+            # Parent fill is on this connection, but positions() has not shown it yet.
+            return
+
+        # Held and now flat, or a restarted session whose orders are gone and size is 0.
+        self._book_ib_exit(None, None, None, completed_index)
+
+    def _book_ib_exit(
+        self,
+        reason: Optional[str],
+        exit_px: Optional[float],
+        fill_ts: Optional[int],
+        completed_index: Optional[int],
+    ) -> None:
+        """Book a flat IB position. A stop arms flip lock; a target or manual close does not."""
+        ot = self.state.open
+        if ot is None:
+            return
+        if reason == "stop":
+            if exit_px is None:
+                exit_px = ot.stop
+        elif reason == "target":
+            if exit_px is None:
+                exit_px = ot.target
+        else:
+            exit_px = self.bars[-1].c if self.bars else ot.entry
+            fill_ts = None
+            # Order status can lag the position. A bar that traded the stop still arms the lock.
+            candidates: list[Bar] = []
+            if completed_index is not None and 0 <= completed_index < len(self.bars):
+                candidates.append(self.bars[completed_index])
+            if self.bars:
+                candidates.append(self.bars[-1])
+            seen_ts: set[int] = set()
+            for candidate in candidates:
+                if candidate.ts in seen_ts:
+                    continue
+                seen_ts.add(candidate.ts)
+                ohlc = resolve_exit_fill(candidate, ot.side, ot.stop, ot.target)
+                if ohlc is None:
+                    continue
+                exit_px, reason = ohlc
+                fill_ts = candidate.ts
+                Log.info("IB flat; bar OHLC exit %s @ %.2f", reason, exit_px)
+                break
+            if reason is None:
+                Log.info("IB flat without a stop or target — flip lock not armed")
+        if fill_ts is not None and self.bars:
+            covered = bar_covering_ts(self.bars, fill_ts)
+            exit_ts = int(covered.ts) if covered is not None else int(fill_ts)
+        elif completed_index is not None and 0 <= completed_index < len(self.bars):
+            exit_ts = self.bars[completed_index].ts
+        elif self.bars:
+            exit_ts = self.bars[-1].ts
+        else:
+            exit_ts = int(time.time() * 1000)
+        if exit_px is None:
+            exit_px = ot.entry
+        Log.info("Position flat on IB — booking close (%s)", reason or "manual")
+        self._book_close(exit_px, exit_ts, reason or "manual", note="IB flat detect")
 
     def _book_close(self, exit_px: float, exit_ts: int, reason: str, note: str) -> None:
         """Account the close. A full stop arms the shared flip lock; a target does not."""
@@ -1287,7 +1367,8 @@ class PaperLoop:
             # Periodic position sync
             if self.place_orders and self.state.open and not self.state.open.simulated:
                 try:
-                    self._sync_position_from_ib()
+                    completed = len(self.bars) - 2 if len(self.bars) >= 2 else None
+                    self._sync_position_from_ib(completed)
                     save_state(self.state)
                 except Exception:  # noqa: BLE001
                     Log.exception("sync failed")
