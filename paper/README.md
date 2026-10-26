@@ -62,6 +62,7 @@ py -3 ib_paper_loop.py --dry-run --max-bars 2
 - 入場：**Limit@訊號收市**；訊號後 **2 根完結 1m bar** 仍未成交 → 取消 parent（未啟動嘅 TP／SL 一齊撤）；成交後止蝕／止賺 GTC 照留  
 - 會計用來回費 **$1.6**（只記帳；IB Paper 另有模擬費用）  
 - 合約：**MNQ · CME** front month（唔係 GLOBEX）
+- **Flip lock 未接入**：網頁 daytime 預設喺止蝕後 15 根 1m bar 封鎖對面新倉（0 = 關）。Paper／IB 循環仍然獨立跑 long／short，未跟呢條鎖，留待 follow-up。
 
 
 ### 常見阻礙

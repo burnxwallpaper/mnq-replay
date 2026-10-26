@@ -5,8 +5,10 @@ import { useEffect, useMemo, useState } from "react";
 import type { EntryFilters } from "@/lib/strategy-script";
 import {
   DEFAULT_ENTRY_FILTERS,
+  DEFAULT_FLIP_LOCK_BARS,
   DEFAULT_ROUND_TRIP_FEE_USD,
   normalizeEntryFilters,
+  normalizeFlipLockBars,
   normalizeRoundTripFee,
 } from "@/lib/strategy-script";
 
@@ -66,17 +68,22 @@ function filtersEqual(a: EntryFilters, b: EntryFilters) {
 export type EntryFiltersSave = {
   filters: EntryFilters;
   roundTripFeeUsd: number;
+  /** Present on the daytime panel. Eve saves omit it so the daytime value stays put. */
+  flipLockBars?: number;
 };
 
 export function EntryFiltersPanel({
   value,
   feeUsd,
+  flipLockBars = DEFAULT_FLIP_LOCK_BARS,
   onChange,
   locked = false,
   lockedNote,
 }: {
   value: EntryFilters;
   feeUsd: number;
+  /** Daytime only. Bars to block the opposite side after a full stop. 0 = off. */
+  flipLockBars?: number;
   onChange: (next: EntryFiltersSave) => void;
   /** Preset bakes these numbers into its scripts, so the knobs do not edit that preset. */
   locked?: boolean;
@@ -84,6 +91,7 @@ export function EntryFiltersPanel({
 }) {
   const [draft, setDraft] = useState<EntryFilters>(value);
   const [feeDraft, setFeeDraft] = useState<number>(feeUsd);
+  const [flipDraft, setFlipDraft] = useState<number>(flipLockBars);
 
   useEffect(() => {
     setDraft(value);
@@ -93,9 +101,13 @@ export function EntryFiltersPanel({
     setFeeDraft(feeUsd);
   }, [feeUsd]);
 
+  useEffect(() => {
+    setFlipDraft(flipLockBars);
+  }, [flipLockBars]);
+
   const dirty = useMemo(
-    () => !filtersEqual(draft, value) || feeDraft !== feeUsd,
-    [draft, value, feeDraft, feeUsd],
+    () => !filtersEqual(draft, value) || feeDraft !== feeUsd || (!locked && flipDraft !== flipLockBars),
+    [draft, value, feeDraft, feeUsd, flipDraft, flipLockBars, locked],
   );
 
   return (
@@ -113,7 +125,7 @@ export function EntryFiltersPanel({
             {locked
               ? (lockedNote ??
                 "This preset bakes its filters into the script. Switch to Daytime to edit the default.")
-              : "改數字後撳 Save 先套用到 Long／Short 預設腳本同手續費（session + 5 EMA 不變）· body ≥ ratio · body pts · vol > SMA × mult · round-trip fee"}
+              : "改數字後撳 Save 先套用到 Long／Short 預設腳本、手續費同 flip lock（session + 5 EMA 不變）· body ≥ ratio · body pts · vol > SMA × mult · round-trip fee · 止蝕後封鎖對面新倉"}
             {(locked ? feeDraft !== feeUsd : dirty) ? (
               <span className="ml-1 text-amber-300/90">· unsaved</span>
             ) : null}
@@ -127,11 +139,12 @@ export function EntryFiltersPanel({
               onClick={() => {
                 setDraft(DEFAULT_ENTRY_FILTERS);
                 setFeeDraft(DEFAULT_ROUND_TRIP_FEE_USD);
+                setFlipDraft(DEFAULT_FLIP_LOCK_BARS);
               }}
             >
               Reset {DEFAULT_ENTRY_FILTERS.bodyRatio} / {DEFAULT_ENTRY_FILTERS.minBody} /{" "}
               {DEFAULT_ENTRY_FILTERS.volLen}×{DEFAULT_ENTRY_FILTERS.volMult} · fee $
-              {DEFAULT_ROUND_TRIP_FEE_USD}
+              {DEFAULT_ROUND_TRIP_FEE_USD} · flip {DEFAULT_FLIP_LOCK_BARS}
             </button>
           )}
           <button
@@ -143,6 +156,7 @@ export function EntryFiltersPanel({
               onChange({
                 filters: locked ? value : normalizeEntryFilters(draft),
                 roundTripFeeUsd: normalizeRoundTripFee(feeDraft),
+                ...(locked ? {} : { flipLockBars: normalizeFlipLockBars(flipDraft) }),
               })
             }
           >
@@ -150,7 +164,7 @@ export function EntryFiltersPanel({
           </button>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+      <div className={`grid grid-cols-2 gap-2 ${locked ? "sm:grid-cols-5" : "sm:grid-cols-3 xl:grid-cols-6"}`}>
         {FIELDS.map((field) => (
           <label
             key={field.key}
@@ -202,6 +216,32 @@ export function EntryFiltersPanel({
           />
           <span className="text-[10px] text-muted-foreground">每單來回扣費</span>
         </label>
+        {locked ? null : (
+          <label
+            className="flex flex-col gap-1 rounded-md bg-black/20 px-2 py-1.5 ring-1 ring-foreground/10"
+            title="止蝕平倉後，之後 N 根 1 分鐘 bar 唔開對面新倉。0 = 關閉。同一邊仍然可以開。"
+          >
+            <span className="font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
+              Flip lock bars
+            </span>
+            <input
+              id="entry-filter-flipLockBars"
+              type="number"
+              inputMode="numeric"
+              step={1}
+              min={0}
+              max={5000}
+              value={flipDraft}
+              onChange={(event) => {
+                const raw = event.target.valueAsNumber;
+                if (!Number.isFinite(raw)) return;
+                setFlipDraft(Math.max(0, raw));
+              }}
+              className="w-full bg-transparent font-mono text-sm outline-none"
+            />
+            <span className="text-[10px] text-muted-foreground">止蝕後鎖對面 · 0 = 關</span>
+          </label>
+        )}
       </div>
     </section>
   );
