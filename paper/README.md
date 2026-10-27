@@ -80,7 +80,7 @@ py -3 paper\ib_paper_loop.py --dry-run --port 4002
 
 網頁 Preset 入面嘅 **Eve 20:30–23:59 · stop2 asym · 2.5R+EMA** 只係 replay 候選，唔會改呢度。Paper／IB 循環保持下面嘅日盤預設。
 
-- Filters：`0.45 / 2 / 15 / 1.2`  
+- Filters：`0.45 / 8 / 15 / 1.2`（minBody 由 2 改為 8）。本機 `paper/config.json` 如果已經寫死 `"minBody": 2`，要改成 8 先會跟住網頁；冇呢個 key 就用程式預設 8。`config.example.json` 已經係 8。  
 - Session：`America/Chicago` **09:00–20:29** 先開新倉（session close 21:00；收市前 30 分鐘唔再開新倉）；**星期五 CT 14:45 起唔再開新倉**；已開倉照常管理／平倉  
 - Long 陽燭 impulse／Short 陰燭 impulse；目標 **2.5R**；收市穿 5 EMA 收窄到 **1R**（改 TP）  
 - 入場：**Limit@訊號收市**；訊號後 **2 根完結 1m bar** 仍未成交 → 取消 parent（未啟動嘅 TP／SL 一齊撤）；成交後止蝕／止賺 GTC 照留  

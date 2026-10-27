@@ -5,6 +5,9 @@ import { runGeneratedLegs, type FastLeg } from "@/lib/strategy-fast";
 
 export const STRATEGY_STORAGE_KEY = "mnq-replay.strategyScript";
 export const ENTRY_FILTERS_STORAGE_KEY = "mnq-replay.entryFilters";
+/** Bumped when a saved copy of the previous daytime filter default should move forward once. */
+export const ENTRY_FILTERS_VERSION_KEY = "mnq-replay.entryFiltersVersion";
+export const ENTRY_FILTERS_VERSION = 2;
 export const ROUND_TRIP_FEE_STORAGE_KEY = "mnq-replay.roundTripFeeUsd";
 export const FLIP_LOCK_BARS_STORAGE_KEY = "mnq-replay.flipLockBars";
 
@@ -33,7 +36,7 @@ export function normalizeRoundTripFee(raw: unknown): number {
 export type EntryFilters = {
   /** Min body / range ratio, e.g. 0.45 */
   bodyRatio: number;
-  /** Min absolute body in index points, e.g. 2 */
+  /** Min absolute body in index points, e.g. 8 */
   minBody: number;
   /** Volume SMA length, e.g. 15 */
   volLen: number;
@@ -42,6 +45,17 @@ export type EntryFilters = {
 };
 
 export const DEFAULT_ENTRY_FILTERS: EntryFilters = {
+  bodyRatio: 0.45,
+  minBody: 8,
+  volLen: 15,
+  volMult: 1.2,
+};
+
+/**
+ * Daytime filters before minBody moved from 2 to 8.
+ * An unversioned saved copy of this exact set upgrades once. A later save of minBody 2 sticks.
+ */
+export const PREVIOUS_DEFAULT_ENTRY_FILTERS: EntryFilters = {
   bodyRatio: 0.45,
   minBody: 2,
   volLen: 15,
@@ -87,6 +101,33 @@ function clampFilters(raw: Partial<EntryFilters> | null | undefined): EntryFilte
 
 export function normalizeEntryFilters(raw: Partial<EntryFilters> | null | undefined): EntryFilters {
   return clampFilters(raw);
+}
+
+function sameEntryFilters(a: EntryFilters, b: EntryFilters): boolean {
+  return (
+    a.bodyRatio === b.bodyRatio &&
+    a.minBody === b.minBody &&
+    a.volLen === b.volLen &&
+    a.volMult === b.volMult
+  );
+}
+
+/**
+ * Read daytime filters from storage.
+ * Missing storage uses the current default. An unversioned copy of the pre-mb8
+ * default (0.45 / 2 / 15 / 1.2) moves to minBody 8 once. Version
+ * {@link ENTRY_FILTERS_VERSION} keeps an explicit later save, including minBody 2.
+ */
+export function resolveStoredEntryFilters(raw: unknown, storedVersion: unknown): EntryFilters {
+  const filters = normalizeEntryFilters(
+    raw !== null && typeof raw === "object" ? (raw as Partial<EntryFilters>) : null,
+  );
+  const version = typeof storedVersion === "number" ? storedVersion : Number(storedVersion);
+  const migrated = Number.isFinite(version) && version >= ENTRY_FILTERS_VERSION;
+  if (!migrated && sameEntryFilters(filters, PREVIOUS_DEFAULT_ENTRY_FILTERS)) {
+    return { ...DEFAULT_ENTRY_FILTERS };
+  }
+  return filters;
 }
 
 /** Previous on-page defaults. A saved copy of either one upgrades to the current script. */
@@ -263,6 +304,8 @@ export function isStaleDefaultScript(script: string) {
   if (script === LEGACY_DEFAULT_STRATEGY_SCRIPT || script === EMA_EXIT_DEFAULT_STRATEGY_SCRIPT) {
     return true;
   }
+  // Saved copy of the daytime script from before minBody moved 2 → 8.
+  if (script === buildLongStrategyScript(PREVIOUS_DEFAULT_ENTRY_FILTERS)) return true;
   // Pre-2.5R defaults (including prior session cutoffs): still say target 2R.
   if (script.includes("Impulse entries still target 2R")) {
     return true;

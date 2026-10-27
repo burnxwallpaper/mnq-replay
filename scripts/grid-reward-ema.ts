@@ -1,6 +1,6 @@
 /**
  * Grid: base take-profit R × EMA→1R tighten ON/OFF.
- * Fixed: Combined long+short, filters 0.45/2/15/1.2, fee $1.6,
+ * Fixed: Combined long+short, filters from DEFAULT_ENTRY_FILTERS (0.45/8/15/1.2), fee $1.6,
  * session CT 09:00–20:29, Fri ≥14:45 no new entries.
  * Does NOT change production defaults / Pages.
  */

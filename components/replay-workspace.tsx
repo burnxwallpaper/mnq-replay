@@ -25,6 +25,8 @@ import {
   DEFAULT_FLIP_LOCK_BARS,
   DEFAULT_ROUND_TRIP_FEE_USD,
   ENTRY_FILTERS_STORAGE_KEY,
+  ENTRY_FILTERS_VERSION,
+  ENTRY_FILTERS_VERSION_KEY,
   EVE_ENTRY_FILTERS,
   EVE_LONG_STRATEGY_SCRIPT,
   EVE_SHORT_STRATEGY_SCRIPT,
@@ -37,6 +39,7 @@ import {
   buildShortStrategyScript,
   mergeScriptRuns,
   normalizeEntryFilters,
+  resolveStoredEntryFilters,
   normalizeFlipLockBars,
   normalizeRoundTripFee,
   normalizeStrategyPreset,
@@ -96,8 +99,7 @@ function readEntryFilters(): EntryFilters {
     const raw = window.localStorage.getItem(ENTRY_FILTERS_STORAGE_KEY);
     if (!raw) return DEFAULT_ENTRY_FILTERS;
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return DEFAULT_ENTRY_FILTERS;
-    return normalizeEntryFilters(parsed as Partial<EntryFilters>);
+    return resolveStoredEntryFilters(parsed, window.localStorage.getItem(ENTRY_FILTERS_VERSION_KEY));
   } catch {
     return DEFAULT_ENTRY_FILTERS;
   }
@@ -106,6 +108,7 @@ function readEntryFilters(): EntryFilters {
 function writeEntryFilters(filters: EntryFilters) {
   try {
     window.localStorage.setItem(ENTRY_FILTERS_STORAGE_KEY, JSON.stringify(filters));
+    window.localStorage.setItem(ENTRY_FILTERS_VERSION_KEY, String(ENTRY_FILTERS_VERSION));
   } catch {
     // Ignore private-mode storage failures.
   }
@@ -647,7 +650,7 @@ export function ReplayWorkspace() {
         <p id="strategy-runners-help" className="text-xs text-muted-foreground">
           {presetId === "eve"
             ? "Eve candidate: CT 20:30–23:59 only, vstrict 0.7/6/20×2.2, stop 2× risk1, target and EMA→1R still use risk1. Combined long+short. Daytime stays the default when you switch back."
-            : `Daytime default: CT 09:00–20:29, Fri no new entries from 14:45, filters 0.45/2/15×1.2, stop at the bar extreme, flip lock ${flipLockBars} (0 = off; above 0 blocks a new opposite-side entry for that many 1m bars after a full stop, Save to apply). Long and Short share that lock when both are checked.`}
+            : `Daytime default: CT 09:00–20:29, Fri no new entries from 14:45, filters ${DEFAULT_ENTRY_FILTERS.bodyRatio}/${DEFAULT_ENTRY_FILTERS.minBody}/${DEFAULT_ENTRY_FILTERS.volLen}×${DEFAULT_ENTRY_FILTERS.volMult}, stop at the bar extreme, flip lock ${flipLockBars} (0 = off; above 0 blocks a new opposite-side entry for that many 1m bars after a full stop, Save to apply). Long and Short share that lock when both are checked.`}
         </p>
         {presetId === "eve" ? (
           <p id="strategy-preset-note" className="text-xs text-muted-foreground">
