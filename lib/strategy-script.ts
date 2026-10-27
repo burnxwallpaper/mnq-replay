@@ -8,10 +8,10 @@ export const FLIP_LOCK_BARS_STORAGE_KEY = "mnq-replay.flipLockBars";
 
 /**
  * After a full stop, block new opposite-side entries for this many 1m bars.
- * 0 turns the lock off. Daytime combined long+short uses this by default.
- * Eve and single-side runs do not.
+ * 0 turns the lock off and is the daytime default. Set above 0 to enable.
+ * Eve and single-side runs do not use this lock.
  */
-export const DEFAULT_FLIP_LOCK_BARS = 15;
+export const DEFAULT_FLIP_LOCK_BARS = 0;
 
 export function normalizeFlipLockBars(raw: unknown, fallback = DEFAULT_FLIP_LOCK_BARS): number {
   const n = typeof raw === "number" ? raw : Number(raw);
@@ -462,7 +462,7 @@ export type RunStrategyOptions = {
    * Same-side entries stay allowed. A pending limit whose signal bar is already
    * accepted can still fill inside the window. `0` disables.
    * Omitted on `runStrategyScript` means off, so a single leg cannot see the other side.
-   * Omitted on `runLinkedStrategyScripts` means `DEFAULT_FLIP_LOCK_BARS` (15).
+   * Omitted on `runLinkedStrategyScripts` means `DEFAULT_FLIP_LOCK_BARS` (0, off).
    */
   flipLockBars?: number;
 };
@@ -784,7 +784,7 @@ export function runStrategyScript(
   const linked = runLinkedStrategyScripts(bars, [{ id: strategyId, source }], {
     ...options,
     // A lone script has no other side to lock. Callers that want the shared
-    // daytime lock use runLinkedStrategyScripts (default 15).
+    // daytime lock use runLinkedStrategyScripts (default 0, off).
     flipLockBars: options.flipLockBars ?? 0,
   });
   if (!linked.ok) {

@@ -23,5 +23,5 @@
   "limitOffsetTicks": 0,
   "rewardMultiple": 2.5,
   "entryLimitExpiryBars": 2,
-  "flipLockBars": 15
+  "flipLockBars": 0
 }
