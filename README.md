@@ -2,7 +2,7 @@
 
 Personal 1-minute Micro E-mini Nasdaq-100 replay. The page is a candlestick chart with play, pause, step, and a scrubber.
 
-The chart loads real `CME_MINI:MNQ1!` 1-minute OHLCV from `public/data/mnq-1m-bars.json` (TradingView Premium prodata dump). Refresh that file to update history.
+The chart loads real MNQ 1-minute OHLCV. GitHub Pages reads `docs/data/mnq-1m-bars.json`, a small manifest. A first visit fetches only `docs/data/mnq-1m-recent.json` (the last 90 days). The History menu can load one year or the full 2021–2026 set. `public/data/mnq-1m-bars.json` remains the full JSON array for local Node scripts.
 
 ## Preview
 
@@ -43,7 +43,7 @@ The workflow sets that from the repository name. A hand build for a project site
 
 Space plays and pauses. The range input scrubs the cursor. Bars after the cursor stay hidden, and strategy markers appear only once the cursor reaches them. The side panel shows total R and dollar PnL for enabled strategies, including an open trade marked at the cursor close.
 
-The chart’s backtest runs the browser scripts in `lib/strategy-script.ts` (the editor at the bottom of the page). `strategies/*.json` is a separate impulse-pullback schema and is not what the page runs.
+The chart’s backtest runs the browser scripts in `lib/strategy-script.ts` (the editor at the bottom of the page). Generated daytime and eve scripts take a native loop with the same fills and flip lock, so a full-history run stays on the order of a second instead of several minutes. Edited scripts that still contain the Chicago session block use a precomputed mask. Anything else still runs the interpreter. `strategies/*.json` is a separate impulse-pullback schema and is not what the page runs. `npm run paper:local` uses the same engine on `public/data/mnq-1m-bars.json`. Rebuild the Pages manifest after a shard refresh with `node scripts/build-history-manifest.mjs`.
 
 The Preset menu has two choices. **Daytime 09:00–20:29 (default)** is selected on a fresh visit: America/Chicago 09:00–20:29, no new Friday entries from 14:45, filters 0.45 / 2 / 15 / 1.2, stop at the signal-bar extreme, target 2.5R, and a close through the 5 EMA tightens the target to 1R. Flip lock is off by default (**Flip lock bars** = 0). Set it above 0 and Save to block a new opposite-side entry for that many one-minute bars after a full stop (same-side entries still allowed). The lock is shared by Long and Short, so it only applies when both runners are checked. Long starts on and short stays off until it is checked. The paper and IB loop use this same daytime session, filters, and shared flip lock (default 0; set it above 0 to turn it on). See `paper/README.md` to start IBKR Paper on Gateway port 4002. That loop is Paper only.
 
@@ -65,8 +65,10 @@ TradingView, logged out, exposes roughly the current week of 1-minute bars. A Pr
 | --- | --- |
 | `app/` | Replay page, statically exported to `out/` |
 | `.github/workflows/pages.yml` | GitHub Actions deploy of `out/` |
-| `lib/fixture-bars.ts` | Bar loaders/formatters; data file is `public/data/mnq-1m-bars.json` |
-| `public/data/mnq-1m-bars.json` | Real MNQ1! 1m OHLCV (`t,o,h,l,c,v`) |
+| `lib/fixture-bars.ts` | Bar loader. Pages default is the last 90 days; years and full history load on request |
+| `docs/data/mnq-1m-recent.json` | Default Pages window (last 90 days) |
+| `docs/data/mnq-1m-bars-YYYY.json` | One calendar year, fetched only from the History menu |
+| `public/data/mnq-1m-bars.json` | Full MNQ 1m OHLCV for local Node scripts (`t,o,h,l,c,v`) |
 | `strategies/` | One JSON config per strategy, plus `schema.json` |
 | `db/schema.sql` | Tracked bar-table schema |
 | `data/raw/` | Future dumps, gitignored |

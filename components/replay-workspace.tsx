@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BacktestReport } from "@/components/backtest-report";
 import { CandleChart } from "@/components/candle-chart";
 import { ReplayTransport } from "@/components/replay-transport";
@@ -10,10 +10,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import {
   FIXTURE_NOTE,
+  fetchHistoryCatalog,
   formatFixturePrice,
   formatFixtureTime,
-  loadMnqBars,
+  loadHistoryPack,
+  readStoredHistoryPack,
+  writeStoredHistoryPack,
   type FixtureBar,
+  type HistoryCatalog,
 } from "@/lib/fixture-bars";
 import { EntryFiltersPanel } from "@/components/entry-filters";
 import {
@@ -48,6 +52,8 @@ import {
 
 const PLAY_MS = 180;
 const INITIAL_VISIBLE = 180;
+/** lightweight-charts stays responsive under this many candles. */
+const CHART_BAR_CAP = 100_000;
 const RUNNERS_STORAGE_KEY = "mnq-replay.enabledRunners";
 const SHOW_PRICE_CHART_STORAGE_KEY = "mnq-replay.showPriceChart";
 
@@ -186,6 +192,9 @@ function writeShowPriceChart(show: boolean) {
 
 export function ReplayWorkspace() {
   const [bars, setBars] = useState<FixtureBar[] | null>(null);
+  const [catalog, setCatalog] = useState<HistoryCatalog | null>(null);
+  const [packId, setPackId] = useState("recent");
+  const [historyNote, setHistoryNote] = useState("Loading recent MNQ history…");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -203,8 +212,16 @@ export function ReplayWorkspace() {
   const [presetEpoch, setPresetEpoch] = useState(0);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
   const priceChartHydratedRef = useRef(false);
+  const loadGen = useRef(0);
   const lastIndex = bars ? bars.length - 1 : 0;
   const toggleRef = useRef<() => void>(() => {});
+
+  const showBars = useCallback((loaded: FixtureBar[]) => {
+    setBars(loaded);
+    setIndex(Math.max(0, loaded.length - INITIAL_VISIBLE));
+    setPlaying(false);
+    setFitRevision((current) => current + 1);
+  }, []);
 
   useEffect(() => {
     const saved = readEnabledRunners();
@@ -257,22 +274,64 @@ export function ReplayWorkspace() {
   }, [flipLockBars, settingsHydrated]);
 
   useEffect(() => {
+    const gen = ++loadGen.current;
     let cancelled = false;
-    loadMnqBars()
-      .then((loaded) => {
-        if (cancelled) return;
-        setBars(loaded);
-        setIndex(Math.max(0, loaded.length - INITIAL_VISIBLE));
-        setFitRevision((current) => current + 1);
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
+    const saved = readStoredHistoryPack();
+    void (async () => {
+      try {
+        const nextCatalog = await fetchHistoryCatalog();
+        if (cancelled || loadGen.current !== gen) return;
+        setCatalog(nextCatalog);
+        const recentId = nextCatalog.defaultPack;
+        const recent = await loadHistoryPack(nextCatalog, recentId, (message) => {
+          if (!cancelled && loadGen.current === gen) setHistoryNote(message);
+        });
+        if (cancelled || loadGen.current !== gen) return;
+        showBars(recent.bars);
+        setPackId(recent.packId);
+        setHistoryNote("");
+        if (!saved || saved === recent.packId || !nextCatalog.packs.some((pack) => pack.id === saved)) {
+          return;
+        }
+        const savedPack = nextCatalog.packs.find((pack) => pack.id === saved);
+        setHistoryNote(savedPack ? `Loading ${savedPack.label}…` : "Loading history…");
+        const chosen = await loadHistoryPack(nextCatalog, saved, (message) => {
+          if (!cancelled && loadGen.current === gen) setHistoryNote(message);
+        });
+        if (cancelled || loadGen.current !== gen) return;
+        showBars(chosen.bars);
+        setPackId(chosen.packId);
+        setHistoryNote("");
+      } catch (error: unknown) {
+        if (cancelled || loadGen.current !== gen) return;
         setLoadError(error instanceof Error ? error.message : "Failed to load bars");
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [showBars]);
+
+  async function pickHistoryPack(nextId: string) {
+    if (!catalog) return;
+    const gen = ++loadGen.current;
+    const pack = catalog.packs.find((item) => item.id === nextId);
+    writeStoredHistoryPack(nextId);
+    setPackId(nextId);
+    setHistoryNote(pack ? `Loading ${pack.label}…` : "Loading history…");
+    try {
+      const loaded = await loadHistoryPack(catalog, nextId, (message) => {
+        if (loadGen.current === gen) setHistoryNote(message);
+      });
+      if (loadGen.current !== gen) return;
+      showBars(loaded.bars);
+      setPackId(loaded.packId);
+      setHistoryNote("");
+    } catch (error: unknown) {
+      if (loadGen.current !== gen) return;
+      setHistoryNote(error instanceof Error ? error.message : "Failed to load history");
+    }
+  }
 
   toggleRef.current = () => {
     if (!bars) return;
@@ -418,6 +477,11 @@ export function ReplayWorkspace() {
     if (namedRuns.some((item) => !item.run.ok)) return null;
     return summarizeMultiBacktest(namedRuns, bars, roundTripFeeUsd);
   }, [namedRuns, bars, roundTripFeeUsd]);
+  const chartWindow = useMemo(() => {
+    if (!bars || bars.length <= CHART_BAR_CAP) return { bars: bars ?? [], offset: 0 };
+    const offset = bars.length - CHART_BAR_CAP;
+    return { bars: bars.slice(offset), offset };
+  }, [bars]);
 
   if (loadError) {
     return (
@@ -432,27 +496,31 @@ export function ReplayWorkspace() {
     return (
       <main className="mx-auto flex min-h-dvh w-full max-w-[720px] flex-col gap-3 p-6">
         <h1 className="font-mono text-lg font-medium">MNQ Replay</h1>
-        <p className="font-mono text-sm text-muted-foreground">
-          Loading MNQ 1m history…
-        </p>
+        <p className="font-mono text-sm text-muted-foreground">{historyNote}</p>
       </main>
     );
   }
 
-  const cursor = bars[index];
+  const cursor = bars[index] ?? bars[bars.length - 1];
   const bothRunners = longEnabled && shortEnabled;
-  const chartMarkers = (mergedRun?.ok ? mergedRun.markers : []).map((marker) => ({
-    strategyId: marker.strategyId,
-    barIndex: marker.barIndex,
-    visibleFromIndex: marker.visibleFromIndex,
-    kind: marker.kind,
-    win: marker.win,
-    localIndex: marker.barIndex,
-    ...(typeof marker.price === "number" ? { price: marker.price } : {}),
-    ...(marker.side ? { side: marker.side } : {}),
-  }));
-  const entryCount = chartMarkers.filter((marker) => marker.kind === "entry").length;
-  const exitCount = chartMarkers.filter((marker) => marker.kind === "exit").length;
+  const chartOffset = chartWindow.offset;
+  const chartBars = chartWindow.bars;
+  const chartCursor = index >= chartOffset ? index - chartOffset : null;
+  const allMarkers = mergedRun?.ok ? mergedRun.markers : [];
+  const chartMarkers = allMarkers
+    .filter((marker) => marker.barIndex >= chartOffset)
+    .map((marker) => ({
+      strategyId: marker.strategyId,
+      barIndex: marker.barIndex,
+      visibleFromIndex: marker.visibleFromIndex,
+      kind: marker.kind,
+      win: marker.win,
+      localIndex: marker.barIndex - chartOffset,
+      ...(typeof marker.price === "number" ? { price: marker.price } : {}),
+      ...(marker.side ? { side: marker.side } : {}),
+    }));
+  const entryCount = allMarkers.filter((marker) => marker.kind === "entry").length;
+  const exitCount = allMarkers.filter((marker) => marker.kind === "exit").length;
   const tradeCount = mergedRun?.ok ? mergedRun.trades.length : 0;
   const tradeLabel = tradeCount === 1 ? "1 trade" : `${tradeCount} trades`;
   const entryLabel = entryCount === 1 ? "1 entry" : `${entryCount} entries`;
@@ -485,10 +553,33 @@ export function ReplayWorkspace() {
           </div>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
             {FIXTURE_NOTE} {bars.length.toLocaleString("en-US")} bars ·{" "}
-            {earliestLabel} → {latestLabel}. Drag the chart to pan. Drag the
-            right price scale up or down to zoom. Scroll to zoom time. Replay
-            only moves the cursor.
+            {earliestLabel} → {latestLabel}. The first load is the last 90 days.
+            Pick a year or full history for a longer backtest. Drag the chart to
+            pan. Drag the right price scale up or down to zoom. Scroll to zoom
+            time. Replay only moves the cursor.
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <label className="inline-flex items-center gap-2 font-mono text-xs" htmlFor="history-pack">
+              <span className="text-muted-foreground uppercase">History</span>
+              <select
+                id="history-pack"
+                value={packId}
+                onChange={(event) => {
+                  void pickHistoryPack(event.target.value);
+                }}
+                className="max-w-[24rem] rounded-md border border-foreground/15 bg-background px-2 py-1 text-xs text-foreground"
+              >
+                {(catalog?.packs ?? []).map((pack) => (
+                  <option key={pack.id} value={pack.id}>
+                    {pack.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {historyNote ? (
+              <span className="font-mono text-xs text-muted-foreground">{historyNote}</span>
+            ) : null}
+          </div>
         </div>
         <p className="font-mono text-sm text-foreground">{cursorLabel}</p>
       </header>
@@ -623,10 +714,16 @@ export function ReplayWorkspace() {
               Hide price chart
             </button>
           </div>
+          {chartOffset > 0 ? (
+            <p className="pointer-events-none absolute bottom-2 left-3 z-10 text-[10px] text-muted-foreground">
+              Chart shows the latest {CHART_BAR_CAP.toLocaleString("en-US")} bars. The backtest uses
+              the full loaded range.
+            </p>
+          ) : null}
           <CandleChart
-            bars={bars}
+            bars={chartBars}
             markers={chartMarkers}
-            cursorIndex={index}
+            cursorIndex={chartCursor}
             fitRevision={fitRevision}
             labelStrategies={bothRunners}
           />
@@ -638,6 +735,9 @@ export function ReplayWorkspace() {
         >
           <p className="text-xs text-muted-foreground">
             Price chart hidden (faster). Equity / backtest report stays below.
+            {chartOffset > 0
+              ? ` Showing the chart uses the latest ${CHART_BAR_CAP.toLocaleString("en-US")} bars.`
+              : ""}
           </p>
           <button
             type="button"

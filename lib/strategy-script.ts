@@ -1,5 +1,7 @@
+import { fillSessionMasks } from "@/lib/chicago-session";
 import { ema } from "@/lib/ema";
 import type { OhlcvBar } from "@/lib/strategies/types";
+import { runGeneratedLegs, type FastLeg } from "@/lib/strategy-fast";
 
 export const STRATEGY_STORAGE_KEY = "mnq-replay.strategyScript";
 export const ENTRY_FILTERS_STORAGE_KEY = "mnq-replay.entryFilters";
@@ -127,6 +129,12 @@ if (!position && bar.c > bar.o && body / span >= 0.55 && body >= 4 && bar.v > av
 return null
 `;
 
+/** Exact Chicago block embedded in the daytime builders. The engine rewrites this to a mask. */
+const DAY_SESSION_SNIPPET = `const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
+const ctMins = Number(ctParts.find((p) => p.type === "hour")?.value ?? 0) * 60 + Number(ctParts.find((p) => p.type === "minute")?.value ?? 0)
+const ctWd = ctParts.find((p) => p.type === "weekday")?.value ?? ""
+const sessionOk = ctMins >= 9 * 60 && ctMins < 21 * 60 - 30 && !(ctWd === "Fri" && ctMins >= 14 * 60 + 45)`;
+
 export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FILTERS): string {
   const f = clampFilters(filters);
   return `// MNQ 1-minute strategy. This runs in the browser on each bar.
@@ -145,10 +153,7 @@ if (position && position.side === "long" && bar.c < ema5) {
 }
 
 // SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
-const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
-const ctMins = Number(ctParts.find((p) => p.type === "hour")?.value ?? 0) * 60 + Number(ctParts.find((p) => p.type === "minute")?.value ?? 0)
-const ctWd = ctParts.find((p) => p.type === "weekday")?.value ?? ""
-const sessionOk = ctMins >= 9 * 60 && ctMins < 21 * 60 - 30 && !(ctWd === "Fri" && ctMins >= 14 * 60 + 45)
+${DAY_SESSION_SNIPPET}
 const avgVol = ta.sma(i, ${f.volLen}, "v")
 const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
@@ -179,10 +184,7 @@ if (position && position.side === "short" && bar.c > ema5) {
 }
 
 // SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
-const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
-const ctMins = Number(ctParts.find((p) => p.type === "hour")?.value ?? 0) * 60 + Number(ctParts.find((p) => p.type === "minute")?.value ?? 0)
-const ctWd = ctParts.find((p) => p.type === "weekday")?.value ?? ""
-const sessionOk = ctMins >= 9 * 60 && ctMins < 21 * 60 - 30 && !(ctWd === "Fri" && ctMins >= 14 * 60 + 45)
+${DAY_SESSION_SNIPPET}
 const avgVol = ta.sma(i, ${f.volLen}, "v")
 const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
@@ -200,6 +202,10 @@ export const DEFAULT_SHORT_STRATEGY_SCRIPT = buildShortStrategyScript(DEFAULT_EN
 /** Chicago minute-of-day bounds for the evening candidate (20:30 through 23:59 inclusive). */
 const EVE_SESSION_START_MINS = 20 * 60 + 30;
 const EVE_SESSION_END_MINS = 23 * 60 + 59;
+
+const EVE_SESSION_SNIPPET = `const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
+const ctMins = Number(ctParts.find((p) => p.type === "hour")?.value ?? 0) * 60 + Number(ctParts.find((p) => p.type === "minute")?.value ?? 0)
+const sessionOk = ctMins >= ${EVE_SESSION_START_MINS} && ctMins <= ${EVE_SESSION_END_MINS}`;
 
 function buildEveLegScript(side: "long" | "short", filters: EntryFilters): string {
   const f = clampFilters(filters);
@@ -228,9 +234,7 @@ if (position && position.side === "${side}" && ${emaCmp}) {
 }
 
 // EVE_SESSION=20:30–23:59 America/Chicago. No Friday cutoff. Hours outside this window do not enter.
-const ctParts = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(bar.ts))
-const ctMins = Number(ctParts.find((p) => p.type === "hour")?.value ?? 0) * 60 + Number(ctParts.find((p) => p.type === "minute")?.value ?? 0)
-const sessionOk = ctMins >= ${EVE_SESSION_START_MINS} && ctMins <= ${EVE_SESSION_END_MINS}
+${EVE_SESSION_SNIPPET}
 const avgVol = ta.sma(i, ${f.volLen}, "v")
 const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
@@ -328,14 +332,18 @@ type PositionView = {
   risk: number;
 };
 
+type TaApi = {
+  sma: (index: number, length: number, field: Field) => number;
+  ema: (index: number, length: number, field: Field) => number;
+  daySession: (index: number) => boolean;
+  eveSession: (index: number) => boolean;
+};
+
 type BarFn = (
   bar: OhlcvBar,
   i: number,
   bars: OhlcvBar[],
-  ta: {
-    sma: (index: number, length: number, field: Field) => number;
-    ema: (index: number, length: number, field: Field) => number;
-  },
+  ta: TaApi,
   position: PositionView | null,
 ) => unknown;
 
@@ -465,6 +473,12 @@ export type RunStrategyOptions = {
    * Omitted on `runLinkedStrategyScripts` means `DEFAULT_FLIP_LOCK_BARS` (0, off).
    */
   flipLockBars?: number;
+  /**
+   * Run the user script as written, including per-bar Chicago Intl.
+   * The default path uses a native loop for generated daytime/eve scripts
+   * and a precomputed session mask for scripts that still contain that block.
+   */
+  forceInterpreter?: boolean;
 };
 
 type PendingEntry = {
@@ -488,10 +502,7 @@ export type FlipLock = {
 type StrategyLeg = {
   id: string;
   fn: BarFn;
-  ta: {
-    sma: (index: number, length: number, field: Field) => number;
-    ema: (index: number, length: number, field: Field) => number;
-  };
+  ta: TaApi;
   markers: ScriptMarker[];
   trades: ScriptTrade[];
   open: ScriptTrade | null;
@@ -532,8 +543,60 @@ export function isOppositeFlipLocked(
   return false;
 }
 
-function makeTa(bars: OhlcvBar[], emaCache: Map<string, (number | null)[]>): StrategyLeg["ta"] {
+function accelerateSession(source: string): string {
+  if (source.includes(DAY_SESSION_SNIPPET)) {
+    return source.replaceAll(DAY_SESSION_SNIPPET, "const sessionOk = ta.daySession(i)");
+  }
+  if (source.includes(EVE_SESSION_SNIPPET)) {
+    return source.replaceAll(EVE_SESSION_SNIPPET, "const sessionOk = ta.eveSession(i)");
+  }
+  return source;
+}
+
+const FILTER_NUMBERS =
+  /body\/range >= ([0-9.]+), body >= ([0-9.]+), vol > SMA\(([0-9]+)\) \* ([0-9.]+)/;
+
+function classifyGeneratedLeg(id: string, source: string): FastLeg | null {
+  const match = FILTER_NUMBERS.exec(source);
+  if (!match) return null;
+  const filters = normalizeEntryFilters({
+    bodyRatio: Number(match[1]),
+    minBody: Number(match[2]),
+    volLen: Number(match[3]),
+    volMult: Number(match[4]),
+  });
+  if (source === buildLongStrategyScript(filters)) return { id, kind: "day", side: "long", filters };
+  if (source === buildShortStrategyScript(filters)) return { id, kind: "day", side: "short", filters };
+  if (source === buildEveLongStrategyScript(filters)) {
+    return { id, kind: "eve", side: "long", filters };
+  }
+  if (source === buildEveShortStrategyScript(filters)) {
+    return { id, kind: "eve", side: "short", filters };
+  }
+  return null;
+}
+
+function sessionMasks(bars: OhlcvBar[]): { day: Uint8Array; eve: Uint8Array } {
+  const day = new Uint8Array(bars.length);
+  const eve = new Uint8Array(bars.length);
+  const tsMs = new Float64Array(bars.length);
+  for (let i = 0; i < bars.length; i += 1) tsMs[i] = bars[i].ts;
+  fillSessionMasks(tsMs, day, eve);
+  return { day, eve };
+}
+
+function makeTa(
+  bars: OhlcvBar[],
+  emaCache: Map<string, (number | null)[]>,
+  sessions: { day: Uint8Array; eve: Uint8Array } | null,
+): StrategyLeg["ta"] {
   return {
+    daySession(index: number) {
+      return sessions !== null && sessions.day[index] === 1;
+    },
+    eveSession(index: number) {
+      return sessions !== null && sessions.eve[index] === 1;
+    },
     sma(index: number, length: number, field: Field) {
       if (!isField(field) || length < 1) return 0;
       const start = Math.max(0, index - Math.floor(length) + 1);
@@ -591,13 +654,41 @@ export function runLinkedStrategyScripts(
       ? DEFAULT_FLIP_LOCK_BARS
       : normalizeFlipLockBars(options.flipLockBars, 0);
 
+  if (!options.forceInterpreter) {
+    const classified: FastLeg[] = [];
+    let allKnown = specs.length > 0;
+    for (const spec of specs) {
+      const leg = classifyGeneratedLeg(spec.id, spec.source);
+      if (!leg) {
+        allKnown = false;
+        break;
+      }
+      classified.push(leg);
+    }
+    if (allKnown) {
+      return runGeneratedLegs(bars, classified, {
+        entryLimitExpiryBars: expiryBars,
+        flipLockBars,
+      });
+    }
+  }
+
+  const sources = specs.map((spec) =>
+    options.forceInterpreter ? spec.source : accelerateSession(spec.source),
+  );
+  const sessions = sources.some((source, index) => source !== specs[index]?.source)
+    ? sessionMasks(bars)
+    : null;
+
   const legs: StrategyLeg[] = [];
-  for (const spec of specs) {
+  for (let specIndex = 0; specIndex < specs.length; specIndex += 1) {
+    const spec = specs[specIndex];
+    const source = sources[specIndex] ?? spec.source;
     try {
       legs.push({
         id: spec.id,
-        fn: compile(spec.source),
-        ta: makeTa(bars, new Map()),
+        fn: compile(source),
+        ta: makeTa(bars, new Map(), sessions),
         markers: [],
         trades: [],
         open: null,
