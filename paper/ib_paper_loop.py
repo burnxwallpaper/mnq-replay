@@ -7,7 +7,9 @@ Architecture:
   - One-time historical warmup (1m bars) for SMA / EMA / volume
   - Live 1m stream via reqHistoricalData(..., keepUpToDate=True)
     (reqRealTimeBars is 5-second only; keepUpToDate is the 1m path for MNQ)
-  - On each *completed* bar: rolling indicators → signal / EMA tighten → orders
+  - On each *completed* bar: rolling indicators → signal / EMA exit → orders
+  - EMA adverse close → market flatten at (approx) that close (matches web exit@close;
+    no same-bar OHLC 1R look-ahead). Far TP + stop still work until then.
   - Never re-downloads full history every minute
 
 Safety:
@@ -18,12 +20,8 @@ Safety:
   - A working Paper entry stays tracked until the parent fills, the parent is cancelled,
     or that limit expires. An empty positions() snapshot is not a cancel (fills lag it).
   - maxContracts defaults to 1
-  - EMA tighten to 1R revises the working TP limit in place. The modify
-    sends an empty ocaGroup and omits ocaType. ocaType 0 is the text "0" on
-    the wire, an OCA type revision (IB 10327) that cancels the working TP.
-    10326 and 10327 are hard rejects: the live price and OCA stay put, and
-    the log does not say Modified. The stop stays in the original OCA group.
-    target/tightened update only after that modify is accepted.
+  - EMA exit cancels the working bracket and submits a market flatten (Paper).
+    Dry-run books the exit at the completed bar's close.
   - Daytime flip lock (default 0, off): set above 0 to block opposite-side
     entries for that many completed 1m bars after a full stop. Same side stays
     allowed. Shared by long and short when side=both. Paper sockets only.
@@ -430,7 +428,8 @@ class Signal:
 @dataclass
 class EvalResult:
     signal: Optional[Signal] = None
-    tighten_target: Optional[float] = None  # 1R when EMA condition met
+    tighten_target: Optional[float] = None  # legacy 1R (unused when ema_exit_close)
+    ema_exit_close: bool = False  # EMA adverse at close → flatten now
 
 
 def evaluate_bar(
@@ -448,12 +447,12 @@ def evaluate_bar(
     ema5 = ema5_list[index]
     avg_vol = sma_at(volumes, index, filters.volLen)
 
-    # Manage open: EMA tighten to 1R
+    # Manage open: EMA adverse close → exit at close (live/MOC intent)
     if open_trade is not None and ema5 is not None:
-        if open_trade.side == "long" and bar.c < ema5 and not open_trade.tightened:
-            return EvalResult(tighten_target=open_trade.entry + open_trade.risk)
-        if open_trade.side == "short" and bar.c > ema5 and not open_trade.tightened:
-            return EvalResult(tighten_target=open_trade.entry - open_trade.risk)
+        if open_trade.side == "long" and bar.c < ema5:
+            return EvalResult(ema_exit_close=True)
+        if open_trade.side == "short" and bar.c > ema5:
+            return EvalResult(ema_exit_close=True)
         return EvalResult()
 
     if open_trade is not None:
@@ -596,6 +595,11 @@ def replay_flip_locks(
                 managed = evaluate_bar(
                     bars, index, filters, side_mode, open_trade, reward_multiple
                 )
+                if managed.ema_exit_close:
+                    # Count as target exit for flip-lock (does not arm stop lock).
+                    arm_stop_flip_lock(locks, n, bar.ts, open_trade.side, "target")
+                    open_trade = None
+                    continue
                 if managed.tighten_target is not None and not open_trade.tightened:
                     open_trade.target = managed.tighten_target
                     open_trade.tightened = True
@@ -1151,7 +1155,7 @@ class PaperLoop:
                 save_state(self.state)
             return
 
-        # Pass open only when filled so EMA tighten does not run on a resting entry.
+        # Pass open only when filled so EMA exit does not run on a resting entry.
         open_for_eval = self.state.open if (self.state.open and self.state.open.entry_filled) else None
         result = evaluate_bar(
             self.bars,
@@ -1164,25 +1168,17 @@ class PaperLoop:
         pos = "flat" if self.state.open is None else f"{self.state.open.side}@{self.state.open.entry}"
         self._log_bar(source, ct, bar, pos)
 
-        if result.tighten_target is not None and self.state.open and self.state.open.entry_filled:
-            new_tp = round_to_tick(result.tighten_target, self._tick)
+        if result.ema_exit_close and self.state.open and self.state.open.entry_filled:
             Log.info(
-                "TIGHTEN %s target %.2f -> %.2f (1R)",
+                "EMA EXIT %s @ close %.2f (market/MOC)",
                 self.state.open.side,
-                self.state.open.target,
-                new_tp,
+                bar.c,
             )
-            if self.place_orders and not self._modify_take_profit(new_tp):
-                # IB still has the previous limit. Leaving tightened false
-                # lets a later bar retry. Do not pretend the TP moved.
-                Log.warning(
-                    "TIGHTEN not applied %s IB target stays %.2f",
-                    self.state.open.side,
-                    self.state.open.target,
-                )
+            if not self.place_orders:
+                self._book_close(float(bar.c), int(bar.ts), "target", note="EMA exit@close dry-run")
                 return
-            self.state.open.target = new_tp
-            self.state.open.tightened = True
+            if not self._flatten_market_ema(float(bar.c), int(bar.ts)):
+                Log.warning("EMA EXIT market flatten failed; will retry next bar")
             return
 
         if result.signal is None:
@@ -1470,6 +1466,39 @@ class PaperLoop:
             exit_px = ot.entry
         Log.info("Position flat on IB — booking close (%s)", reason or "manual")
         self._book_close(exit_px, exit_ts, reason or "manual", note="IB flat detect")
+
+    
+    def _flatten_market_ema(self, exit_px: float, exit_ts: int) -> bool:
+        """Cancel working bracket children and market-flatten on EMA adverse close."""
+        assert self.ib and self.contract and self.state.open
+        from ib_insync import MarketOrder  # type: ignore
+
+        ot = self.state.open
+        # Cancel resting TP/SL so they do not race the market flatten.
+        try:
+            for trade in list(self.ib.openTrades()):
+                if trade.contract.conId != self.contract.conId:
+                    continue
+                o = trade.order
+                if o.orderId and o.orderType in ("LMT", "STP", "STP LMT"):
+                    try:
+                        self.ib.cancelOrder(o)
+                    except Exception as exc:  # noqa: BLE001
+                        Log.warning("cancel child before EMA flatten: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            Log.warning("scan openTrades before EMA flatten: %s", exc)
+
+        exit_action = "SELL" if ot.side == "long" else "BUY"
+        order = MarketOrder(exit_action, ot.qty)
+        order.tif = "DAY"
+        try:
+            self.ib.placeOrder(self.contract, order)
+        except Exception as exc:  # noqa: BLE001
+            Log.error("EMA market flatten placeOrder failed: %s", exc)
+            return False
+        # Book locally at the completed bar close; IB fill may tick differently.
+        self._book_close(exit_px, exit_ts, "target", note="EMA exit@close market")
+        return True
 
     def _book_close(self, exit_px: float, exit_ts: int, reason: str, note: str) -> None:
         """Account the close. A full stop arms the shared flip lock; a target does not."""

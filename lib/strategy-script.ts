@@ -110,13 +110,13 @@ export const EMA_EXIT_DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This 
 // bar: { ts, o, h, l, c, v }
 // ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
 // position: null, or { side, entry, stop, target, risk } while a trade is open
-// Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
+// Return { signal: true, side, stop, target } to enter, { exit: true } to leave at close, { target } to schedule next-bar TP, or null.
 // Entry fills at the signal close. One position at a time.
-// Impulse entries still target 2R. A close below the 5 EMA tightens that to 1R.
+// Impulse entries still target 2R. A close below the 5 EMA exits at that bar's close (market/MOC).
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "long" && bar.c < ema5) {
-  return { target: position.entry + position.risk }
+  return { exit: true }
 }
 
 const avgVol = ta.sma(i, 20, "v")
@@ -141,15 +141,15 @@ export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FI
 // bar: { ts, o, h, l, c, v }
 // ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
 // position: null, or { side, entry, stop, target, risk } while a trade is open
-// Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
+// Return { signal: true, side, stop, target } to enter, { exit: true } to leave at close, { target } to schedule next-bar TP, or null.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close below the 5 EMA tightens that to 1R.
+// Impulse entries still target 2.5R. A close below the 5 EMA exits at that bar's close (market/MOC).
 // New longs only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "long" && bar.c < ema5) {
-  return { target: position.entry + position.risk }
+  return { exit: true }
 }
 
 // SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
@@ -172,15 +172,15 @@ export function buildShortStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_F
 // bar: { ts, o, h, l, c, v }
 // ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
 // position: null, or { side, entry, stop, target, risk } while a trade is open
-// Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
+// Return { signal: true, side, stop, target } to enter, { exit: true } to leave at close, { target } to schedule next-bar TP, or null.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close above the 5 EMA tightens that to 1R.
+// Impulse entries still target 2.5R. A close above the 5 EMA exits at that bar's close (market/MOC).
 // New shorts only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "short" && bar.c > ema5) {
-  return { target: position.entry - position.risk }
+  return { exit: true }
 }
 
 // SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
@@ -222,7 +222,7 @@ function buildEveLegScript(side: "long" | "short", filters: EntryFilters): strin
 // MNQ 1-minute ${side} impulse. Entries only America/Chicago 20:30–23:59 (not the rest of the overnight session).
 // vstrict filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 // stopMult=2 asym: risk1 = max(|close - ${extremeName}|, 1); stop is 2×risk1 from the close.
-// Target is 2.5× risk1. A 5 EMA cross tightens the target to 1× risk1 (position.risk), not to the widened stop.
+// Target is 2.5× risk1. A 5 EMA cross exits at that bar's close (market/MOC); R stats still use risk1, not the widened stop.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
 // Pair with the other Eve leg for combined long+short. Fee $1.6 and 1 contract are app settings.
 // Snapshot on the 41581-bar file (not live truth): ~$10642 final asset · MaxDD $185 · WR 69% · n=62.
@@ -230,7 +230,7 @@ function buildEveLegScript(side: "long" | "short", filters: EntryFilters): strin
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "${side}" && ${emaCmp}) {
-  return { target: ${emaTarget} }
+  return { exit: true }
 }
 
 // EVE_SESSION=20:30–23:59 America/Chicago. No Friday cutoff. Hours outside this window do not enter.
@@ -365,6 +365,14 @@ function readTarget(value: unknown): number | null {
   const record = Object.fromEntries(Object.entries(value));
   if (record.signal === true) return null;
   return readNumber(record, "target");
+}
+
+/** Script `{ exit: true }` or `{ exitAt: "close" }` → leave at this bar's close. */
+function readExit(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const record = Object.fromEntries(Object.entries(value));
+  if (record.signal === true) return false;
+  return record.exit === true || record.exitAt === "close";
 }
 
 function readSignal(value: unknown): {
@@ -507,6 +515,8 @@ type StrategyLeg = {
   trades: ScriptTrade[];
   open: ScriptTrade | null;
   pending: PendingEntry | null;
+  /** EMA→1R (or script target) scheduled on a prior bar; applied at bar start. */
+  pendingTightenTarget: number | null;
 };
 
 /** Append a lock when a trade exits on a full stop. Target exits and `flipLockBars <= 0` do nothing. */
@@ -693,6 +703,7 @@ export function runLinkedStrategyScripts(
         trades: [],
         open: null,
         pending: null,
+        pendingTightenTarget: null,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Script failed to compile.";
@@ -759,8 +770,21 @@ export function runLinkedStrategyScripts(
     for (const leg of legs) {
       if (leg.open !== null) {
         const pos = leg.open;
+        // Apply a prior scheduled TP tighten before this bar's exits.
+        if (leg.pendingTightenTarget !== null) {
+          pos.targetPrice = leg.pendingTightenTarget;
+          leg.pendingTightenTarget = null;
+        }
         const stopped = pos.side === "long" ? bar.l <= pos.stopPrice : bar.h >= pos.stopPrice;
         const targeted = pos.side === "long" ? bar.h >= pos.targetPrice : bar.l <= pos.targetPrice;
+        // Stop / far TP first (intrabar).
+        const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
+        if (exit) {
+          pushExit(leg, pos, i, exit);
+          leg.open = null;
+          leg.pendingTightenTarget = null;
+          continue;
+        }
         if (!stopped && !targeted) {
           let managed: unknown;
           try {
@@ -775,13 +799,16 @@ export function runLinkedStrategyScripts(
             const message = error instanceof Error ? error.message : "Script threw.";
             return { ok: false, error: `${leg.id}: Bar ${i + 1}: ${message}` };
           }
+          // Live-like: { exit: true } → leave at this close (causally valid; no OHLC look-ahead).
+          if (readExit(managed)) {
+            pushExit(leg, pos, i, { price: bar.c, reason: "target" });
+            leg.open = null;
+            leg.pendingTightenTarget = null;
+            continue;
+          }
+          // Legacy { target }: schedule for next bar only.
           const nextTarget = readTarget(managed);
-          if (nextTarget !== null) pos.targetPrice = nextTarget;
-        }
-        const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
-        if (exit) {
-          pushExit(leg, pos, i, exit);
-          leg.open = null;
+          if (nextTarget !== null) leg.pendingTightenTarget = nextTarget;
         }
         continue;
       }
@@ -795,9 +822,29 @@ export function runLinkedStrategyScripts(
           const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
           if (exit) {
             pushExit(leg, pos, i, exit);
-          } else {
-            leg.open = pos;
+            continue;
           }
+          // After fill, allow script manage on this close (EMA { exit: true } → leave @ close).
+          let managed: unknown;
+          try {
+            managed = leg.fn(bar, i, bars, leg.ta, {
+              side: pos.side,
+              entry: pos.entryPrice,
+              stop: pos.stopPrice,
+              target: pos.targetPrice,
+              risk: pos.riskPoints,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Script threw.";
+            return { ok: false, error: `${leg.id}: Bar ${i + 1}: ${message}` };
+          }
+          if (readExit(managed)) {
+            pushExit(leg, pos, i, { price: bar.c, reason: "target" });
+            continue;
+          }
+          const nextTarget = readTarget(managed);
+          if (nextTarget !== null) leg.pendingTightenTarget = nextTarget;
+          leg.open = pos;
           continue;
         }
         pending.barsWaited += 1;

@@ -42,6 +42,8 @@ type LegState = {
   trades: ScriptTrade[];
   open: OpenTrade | null;
   pending: PendingEntry | null;
+  /** EMA→1R price scheduled on a prior bar; applied at the start of this bar. */
+  pendingTightenTarget: number | null;
   volSum: number;
 };
 
@@ -94,11 +96,12 @@ function signalOf(
   return { stop, target, risk: null };
 }
 
+/** Non-null when EMA is adverse at close — caller exits at bar.c (live/MOC). */
 function tightenTarget(spec: FastLeg, bar: OhlcvBar, pos: OpenTrade, emaValue: number): number | null {
   if (pos.side !== spec.side) return null;
   const crossed = spec.side === "long" ? bar.c < emaValue : bar.c > emaValue;
   if (!crossed) return null;
-  return spec.side === "long" ? pos.entryPrice + pos.riskPoints : pos.entryPrice - pos.riskPoints;
+  return bar.c;
 }
 
 /**
@@ -133,6 +136,7 @@ export function runGeneratedLegs(
     trades: [],
     open: null,
     pending: null,
+    pendingTightenTarget: null,
     volSum: 0,
   }));
   const locks: FlipLock[] = [];
@@ -202,16 +206,25 @@ export function runGeneratedLegs(
 
       if (leg.open !== null) {
         const pos = leg.open;
-        const stopped = pos.side === "long" ? bar.l <= pos.stopPrice : bar.h >= pos.stopPrice;
-        const targeted = pos.side === "long" ? bar.h >= pos.targetPrice : bar.l <= pos.targetPrice;
-        if (!stopped && !targeted) {
-          const nextTarget = tightenTarget(leg.spec, bar, pos, emaValue);
-          if (nextTarget !== null) pos.targetPrice = nextTarget;
+        // Legacy scheduled 1R tighten (if any) before exits.
+        if (leg.pendingTightenTarget !== null) {
+          pos.targetPrice = leg.pendingTightenTarget;
+          leg.pendingTightenTarget = null;
         }
+        // Stop / far TP first.
         const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
         if (exit) {
           pushExit(leg, pos, i, exit);
           leg.open = null;
+          leg.pendingTightenTarget = null;
+          continue;
+        }
+        // Live-like: EMA adverse close → exit at this bar's close (no OHLC look-ahead).
+        const emaExit = tightenTarget(leg.spec, bar, pos, emaValue);
+        if (emaExit !== null) {
+          pushExit(leg, pos, i, { price: bar.c, reason: "target" });
+          leg.open = null;
+          leg.pendingTightenTarget = null;
         }
         continue;
       }
@@ -225,9 +238,15 @@ export function runGeneratedLegs(
           const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
           if (exit) {
             pushExit(leg, pos, i, exit);
-          } else {
-            leg.open = pos;
+            continue;
           }
+          // Fill bar close is known: EMA adverse → exit@close (same as open-leg path).
+          const emaExit = tightenTarget(leg.spec, bar, pos, emaValue);
+          if (emaExit !== null) {
+            pushExit(leg, pos, i, { price: bar.c, reason: "target" });
+            continue;
+          }
+          leg.open = pos;
           continue;
         }
         pending.barsWaited += 1;
