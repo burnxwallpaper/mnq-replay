@@ -37,6 +37,16 @@ class OracleParityTest(unittest.TestCase):
             raise AssertionError(f"flip-lock oracle failed\n{proc.stderr}\n{proc.stdout}")
         cls.oracle = json.loads(proc.stdout)
 
+    def test_daytime_filter_default_min_body_matches_the_web(self) -> None:
+        filters = loop.Filters()
+        self.assertEqual(filters.minBody, 2.0)
+        self.assertEqual(filters.bodyRatio, 0.2)
+        self.assertEqual(filters.volLen, 10)
+        self.assertEqual(filters.volMult, 0.2)
+        example = json.loads((PAPER / "config.example.json").read_text(encoding="utf-8"))
+        self.assertEqual(example["filters"]["minBody"], 2)
+        self.assertEqual(example["flipLockBars"], 0)
+
     def test_default_and_normalize_match_the_web_helper(self) -> None:
         self.assertEqual(self.oracle["defaultFlipLockBars"], flip_lock.DEFAULT_FLIP_LOCK_BARS)
         for item in self.oracle["normalize"]:

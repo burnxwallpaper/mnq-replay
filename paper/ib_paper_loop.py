@@ -153,10 +153,10 @@ Log = logging.getLogger("ib_paper_loop")
 
 @dataclass
 class Filters:
-    bodyRatio: float = 0.45
+    bodyRatio: float = 0.2
     minBody: float = 2.0
-    volLen: int = 15
-    volMult: float = 1.2
+    volLen: int = 10
+    volMult: float = 0.2
 
 
 @dataclass
@@ -178,7 +178,7 @@ class Config:
     placeOrders: bool = False
     warmupBars: int = 400
     limitOffsetTicks: float = 0.0  # 0 = limit at bar close; MNQ tick=0.25
-    rewardMultiple: float = 2.5  # initial TP in R; EMA may tighten to 1R
+    rewardMultiple: float = 30.0  # initial TP in R; EMA may tighten to 1R
     entryLimitExpiryBars: int = 2  # cancel unfilled entry after N completed 1m bars
     # Opposite-side lock after a full stop. 0 matches the web daytime default (off).
     flipLockBars: int = DEFAULT_FLIP_LOCK_BARS
@@ -193,10 +193,10 @@ def load_config() -> Config:
             break
     fraw = raw.get("filters") or {}
     filters = Filters(
-        bodyRatio=float(fraw.get("bodyRatio", 0.45)),
+        bodyRatio=float(fraw.get("bodyRatio", 0.2)),
         minBody=float(fraw.get("minBody", 2)),
-        volLen=int(fraw.get("volLen", 15)),
-        volMult=float(fraw.get("volMult", 1.2)),
+        volLen=int(fraw.get("volLen", 10)),
+        volMult=float(fraw.get("volMult", 0.2)),
     )
     return Config(
         mode=str(raw.get("mode", "ib-paper")),
@@ -216,7 +216,7 @@ def load_config() -> Config:
         placeOrders=bool(raw.get("placeOrders", False)),
         warmupBars=max(50, int(raw.get("warmupBars", 400))),
         limitOffsetTicks=float(raw.get("limitOffsetTicks", 0)),
-        rewardMultiple=float(raw.get("rewardMultiple", 2.5)),
+        rewardMultiple=float(raw.get("rewardMultiple", 30)),
         entryLimitExpiryBars=max(1, int(raw.get("entryLimitExpiryBars", ENTRY_LIMIT_EXPIRY_BARS))),
         flipLockBars=normalize_flip_lock_bars(raw["flipLockBars"])
         if "flipLockBars" in raw
@@ -439,7 +439,7 @@ def evaluate_bar(
     filters: Filters,
     side_mode: str,
     open_trade: Optional[OpenTrade],
-    reward_multiple: float = 2.5,
+    reward_multiple: float = 30.0,
 ) -> EvalResult:
     bar = bars[index]
     closes = [b.c for b in bars]
@@ -573,7 +573,7 @@ def replay_flip_locks(
     filters: Filters,
     side_mode: str,
     flip_lock_bars: int,
-    reward_multiple: float = 2.5,
+    reward_multiple: float = 30.0,
     entry_limit_expiry_bars: int = ENTRY_LIMIT_EXPIRY_BARS,
 ) -> list[TsFlipLock]:
     """Rebuild stop locks from bars without placing orders.

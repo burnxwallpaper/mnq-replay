@@ -5,6 +5,9 @@ import { runGeneratedLegs, type FastLeg } from "@/lib/strategy-fast";
 
 export const STRATEGY_STORAGE_KEY = "mnq-replay.strategyScript";
 export const ENTRY_FILTERS_STORAGE_KEY = "mnq-replay.entryFilters";
+/** Bumped when a saved copy of the previous daytime filter default should move forward once. */
+export const ENTRY_FILTERS_VERSION_KEY = "mnq-replay.entryFiltersVersion";
+export const ENTRY_FILTERS_VERSION = 5;
 export const ROUND_TRIP_FEE_STORAGE_KEY = "mnq-replay.roundTripFeeUsd";
 export const FLIP_LOCK_BARS_STORAGE_KEY = "mnq-replay.flipLockBars";
 
@@ -31,19 +34,41 @@ export function normalizeRoundTripFee(raw: unknown): number {
 }
 
 export type EntryFilters = {
-  /** Min body / range ratio, e.g. 0.45 */
+  /** Min body / range ratio, e.g. 0.2 */
   bodyRatio: number;
   /** Min absolute body in index points, e.g. 2 */
   minBody: number;
-  /** Volume SMA length, e.g. 15 */
+  /** Volume SMA length, e.g. 10 */
   volLen: number;
-  /** Volume must exceed SMA × this, e.g. 1.2 */
+  /** Volume must exceed SMA × this, e.g. 0.2 */
   volMult: number;
 };
 
 export const DEFAULT_ENTRY_FILTERS: EntryFilters = {
+  bodyRatio: 0.2,
+  minBody: 2,
+  volLen: 10,
+  volMult: 0.2,
+};
+
+/** Initial TP in R for daytime impulse entries (EMA may tighten to 1R). */
+export const DEFAULT_REWARD_MULTIPLE = 30;
+
+/**
+ * Prior daytime filter defaults that auto-upgrade once when storage version is behind.
+ * An explicit later save (any version >= ENTRY_FILTERS_VERSION) sticks.
+ */
+export const PREVIOUS_DEFAULT_ENTRY_FILTERS: EntryFilters = {
   bodyRatio: 0.45,
   minBody: 2,
+  volLen: 15,
+  volMult: 1.2,
+};
+
+/** Intermediate default from the brief mb8-only experiment (0.45/8/15×1.2). */
+export const PREVIOUS_MB8_ENTRY_FILTERS: EntryFilters = {
+  bodyRatio: 0.45,
+  minBody: 8,
   volLen: 15,
   volMult: 1.2,
 };
@@ -87,6 +112,37 @@ function clampFilters(raw: Partial<EntryFilters> | null | undefined): EntryFilte
 
 export function normalizeEntryFilters(raw: Partial<EntryFilters> | null | undefined): EntryFilters {
   return clampFilters(raw);
+}
+
+function sameEntryFilters(a: EntryFilters, b: EntryFilters): boolean {
+  return (
+    a.bodyRatio === b.bodyRatio &&
+    a.minBody === b.minBody &&
+    a.volLen === b.volLen &&
+    a.volMult === b.volMult
+  );
+}
+
+/**
+ * Read daytime filters from storage.
+ * Missing storage uses the current default. An unversioned / older-version copy of a
+ * prior shipped default (0.45/2/15×1.2 or 0.45/8/15×1.2) upgrades once to Phase C. Version
+ * {@link ENTRY_FILTERS_VERSION} keeps an explicit later save.
+ */
+export function resolveStoredEntryFilters(raw: unknown, storedVersion: unknown): EntryFilters {
+  const filters = normalizeEntryFilters(
+    raw !== null && typeof raw === "object" ? (raw as Partial<EntryFilters>) : null,
+  );
+  const version = typeof storedVersion === "number" ? storedVersion : Number(storedVersion);
+  const migrated = Number.isFinite(version) && version >= ENTRY_FILTERS_VERSION;
+  if (
+    !migrated &&
+    (sameEntryFilters(filters, PREVIOUS_DEFAULT_ENTRY_FILTERS) ||
+      sameEntryFilters(filters, PREVIOUS_MB8_ENTRY_FILTERS))
+  ) {
+    return { ...DEFAULT_ENTRY_FILTERS };
+  }
+  return filters;
 }
 
 /** Previous on-page defaults. A saved copy of either one upgrades to the current script. */
@@ -143,7 +199,7 @@ export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FI
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close below the 5 EMA tightens that to 1R.
+// Impulse entries still target ${DEFAULT_REWARD_MULTIPLE}R. A close below the 5 EMA tightens that to 1R.
 // New longs only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
@@ -159,7 +215,7 @@ const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
 if (!position && sessionOk && bar.c > bar.o && body / span >= ${f.bodyRatio} && body >= ${f.minBody} && bar.v > avgVol * ${f.volMult}) {
   const risk = Math.max(bar.c - bar.l, 1)
-  return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * 2.5 }
+  return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * ${DEFAULT_REWARD_MULTIPLE} }
 }
 return null
 `;
@@ -174,7 +230,7 @@ export function buildShortStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_F
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close above the 5 EMA tightens that to 1R.
+// Impulse entries still target ${DEFAULT_REWARD_MULTIPLE}R. A close above the 5 EMA tightens that to 1R.
 // New shorts only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
@@ -190,7 +246,7 @@ const body = Math.abs(bar.c - bar.o)
 const span = Math.max(bar.h - bar.l, 0.25)
 if (!position && sessionOk && bar.c < bar.o && body / span >= ${f.bodyRatio} && body >= ${f.minBody} && bar.v > avgVol * ${f.volMult}) {
   const risk = Math.max(bar.h - bar.c, 1)
-  return { signal: true, side: "short", stop: bar.h, target: bar.c - risk * 2.5 }
+  return { signal: true, side: "short", stop: bar.h, target: bar.c - risk * ${DEFAULT_REWARD_MULTIPLE} }
 }
 return null
 `;
@@ -263,6 +319,12 @@ export function isStaleDefaultScript(script: string) {
   if (script === LEGACY_DEFAULT_STRATEGY_SCRIPT || script === EMA_EXIT_DEFAULT_STRATEGY_SCRIPT) {
     return true;
   }
+  // Saved daytime scripts from prior shipped filter defaults (still on old reward text).
+  if (script.includes("Impulse entries still target 2.5R")) return true;
+  if (script === buildLongStrategyScript(PREVIOUS_DEFAULT_ENTRY_FILTERS)) return true;
+  if (script === buildShortStrategyScript(PREVIOUS_DEFAULT_ENTRY_FILTERS)) return true;
+  if (script === buildLongStrategyScript(PREVIOUS_MB8_ENTRY_FILTERS)) return true;
+  if (script === buildShortStrategyScript(PREVIOUS_MB8_ENTRY_FILTERS)) return true;
   // Pre-2.5R defaults (including prior session cutoffs): still say target 2R.
   if (script.includes("Impulse entries still target 2R")) {
     return true;
@@ -565,13 +627,17 @@ function classifyGeneratedLeg(id: string, source: string): FastLeg | null {
     volLen: Number(match[3]),
     volMult: Number(match[4]),
   });
-  if (source === buildLongStrategyScript(filters)) return { id, kind: "day", side: "long", filters };
-  if (source === buildShortStrategyScript(filters)) return { id, kind: "day", side: "short", filters };
+  if (source === buildLongStrategyScript(filters)) {
+    return { id, kind: "day", side: "long", filters, rewardMultiple: DEFAULT_REWARD_MULTIPLE };
+  }
+  if (source === buildShortStrategyScript(filters)) {
+    return { id, kind: "day", side: "short", filters, rewardMultiple: DEFAULT_REWARD_MULTIPLE };
+  }
   if (source === buildEveLongStrategyScript(filters)) {
-    return { id, kind: "eve", side: "long", filters };
+    return { id, kind: "eve", side: "long", filters, rewardMultiple: 2.5 };
   }
   if (source === buildEveShortStrategyScript(filters)) {
-    return { id, kind: "eve", side: "short", filters };
+    return { id, kind: "eve", side: "short", filters, rewardMultiple: 2.5 };
   }
   return null;
 }

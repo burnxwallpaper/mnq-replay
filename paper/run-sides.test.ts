@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { OhlcvBar } from "../lib/strategies/types.ts";
+import { DEFAULT_ENTRY_FILTERS } from "../lib/strategy-script.ts";
 import {
   defaultConfig,
   loadConfig,
@@ -64,6 +65,20 @@ function signalIndexes(bars: OhlcvBar[], flipLockBars: number, side: "both" | "l
   }
   return out;
 }
+
+test("paper daytime filters default to the compound web defaults", () => {
+  assert.deepEqual(defaultConfig().filters, DEFAULT_ENTRY_FILTERS);
+  assert.equal(defaultConfig().filters.minBody, 2);
+  assert.equal(defaultConfig().filters.bodyRatio, 0.2);
+  assert.equal(defaultConfig().filters.volLen, 10);
+  assert.equal(defaultConfig().filters.volMult, 0.2);
+  assert.equal(defaultConfig().rewardMultiple, 30);
+  assert.equal(defaultConfig().flipLockBars, 0);
+  const example = loadConfig(join("paper", "config.example.json"));
+  assert.equal(example.filters.minBody, 2);
+  assert.equal(example.rewardMultiple, 30);
+  assert.deepEqual(example.filters, DEFAULT_ENTRY_FILTERS);
+});
 
 test("paper both sides share the web flip lock; 0 and a single side do not", () => {
   assert.equal(paperFlipLockBars({ side: "both", flipLockBars: 15 }), 15);

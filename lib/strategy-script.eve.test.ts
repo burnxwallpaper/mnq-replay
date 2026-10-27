@@ -2,13 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { OhlcvBar } from "./strategies/types.ts";
 import {
+  DEFAULT_ENTRY_FILTERS,
+  DEFAULT_FLIP_LOCK_BARS,
+  DEFAULT_REWARD_MULTIPLE,
   DEFAULT_STRATEGY_SCRIPT,
   DEFAULT_SHORT_STRATEGY_SCRIPT,
+  ENTRY_FILTERS_VERSION,
   EVE_LONG_STRATEGY_SCRIPT,
   EVE_SHORT_STRATEGY_SCRIPT,
+  PREVIOUS_DEFAULT_ENTRY_FILTERS,
+  PREVIOUS_MB8_ENTRY_FILTERS,
   buildLongStrategyScript,
   buildShortStrategyScript,
   isStaleDefaultScript,
+  resolveStoredEntryFilters,
   runStrategyScript,
 } from "./strategy-script.ts";
 
@@ -61,6 +68,19 @@ function signalCount(source: string, bars: OhlcvBar[]): number {
 }
 
 test("daytime scripts stay the session default and are not treated as the eve preset", () => {
+  assert.equal(DEFAULT_ENTRY_FILTERS.minBody, 2);
+  assert.equal(DEFAULT_ENTRY_FILTERS.bodyRatio, 0.2);
+  assert.equal(DEFAULT_ENTRY_FILTERS.volLen, 10);
+  assert.equal(DEFAULT_ENTRY_FILTERS.volMult, 0.2);
+  assert.equal(DEFAULT_REWARD_MULTIPLE, 30);
+  assert.equal(DEFAULT_FLIP_LOCK_BARS, 0);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /body >= 2/);
+  assert.match(DEFAULT_SHORT_STRATEGY_SCRIPT, /body >= 2/);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /body \/ span >= 0\.2/);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /ta\.sma\(i, 10, "v"\)/);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /avgVol \* 0\.2/);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /ta\.ema\(i, 5, "c"\)/);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /risk \* 30/);
   assert.equal(DEFAULT_STRATEGY_SCRIPT.includes("PRESET=eve-2030-2359"), false);
   assert.equal(DEFAULT_SHORT_STRATEGY_SCRIPT.includes("PRESET=eve-2030-2359"), false);
   assert.match(DEFAULT_STRATEGY_SCRIPT, /stop: bar\.l/);
@@ -79,6 +99,25 @@ test("daytime scripts stay the session default and are not treated as the eve pr
   assert.match(EVE_LONG_STRATEGY_SCRIPT, /risk: risk1/);
   assert.match(EVE_SHORT_STRATEGY_SCRIPT, /stop: bar\.c \+ risk1 \* 2/);
   assert.match(EVE_SHORT_STRATEGY_SCRIPT, /target: bar\.c - risk1 \* 2\.5/);
+});
+
+test("a saved copy of a prior daytime filter default upgrades once", () => {
+  const upgraded = resolveStoredEntryFilters(PREVIOUS_DEFAULT_ENTRY_FILTERS, null);
+  assert.deepEqual(upgraded, DEFAULT_ENTRY_FILTERS);
+  assert.equal(upgraded.bodyRatio, 0.2);
+  assert.equal(upgraded.volLen, 10);
+  assert.equal(upgraded.volMult, 0.2);
+
+  const fromMb8 = resolveStoredEntryFilters(PREVIOUS_MB8_ENTRY_FILTERS, null);
+  assert.deepEqual(fromMb8, DEFAULT_ENTRY_FILTERS);
+
+  const explicit = resolveStoredEntryFilters(PREVIOUS_DEFAULT_ENTRY_FILTERS, String(ENTRY_FILTERS_VERSION));
+  assert.equal(explicit.bodyRatio, 0.45);
+  assert.equal(explicit.volLen, 15);
+  assert.equal(explicit.volMult, 1.2);
+
+  const custom = resolveStoredEntryFilters({ ...PREVIOUS_DEFAULT_ENTRY_FILTERS, minBody: 10 }, null);
+  assert.equal(custom.minBody, 10);
 });
 
 test("eve entries only fire from 20:30 through 23:59 Chicago", () => {
@@ -129,7 +168,8 @@ test("eve stop is 2× risk1 while stored risk, target, and EMA→1R stay on risk
   const dayTrade = dayRun.trades[0];
   assert.ok(dayTrade);
   assert.equal(dayTrade.stopPrice, 100);
-  assert.equal(dayTrade.targetPrice, 135);
+  // Daytime default reward is 30R (entry 110, risk 10 → target 410). Eve above stays 2.5R → 135.
+  assert.equal(dayTrade.targetPrice, 410);
   assert.equal(dayTrade.riskPoints, 10);
 });
 

@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import {
   DEFAULT_ENTRY_FILTERS,
   DEFAULT_FLIP_LOCK_BARS,
+  DEFAULT_REWARD_MULTIPLE,
   DEFAULT_ROUND_TRIP_FEE_USD,
   ENTRY_LIMIT_EXPIRY_BARS,
   MNQ_POINT_VALUE,
@@ -50,6 +51,8 @@ export type PaperConfig = {
   flipLockBars: number;
   /** Unfilled entry limit lifetime in completed 1m bars. Matches the IB loop (default 2). */
   entryLimitExpiryBars: number;
+  /** Initial daytime TP in R (EMA may tighten to 1R). Matches web DEFAULT_REWARD_MULTIPLE. */
+  rewardMultiple: number;
 };
 
 export type OpenVirtualPosition = {
@@ -120,6 +123,7 @@ export function defaultConfig(): PaperConfig {
     side: "both",
     flipLockBars: DEFAULT_FLIP_LOCK_BARS,
     entryLimitExpiryBars: ENTRY_LIMIT_EXPIRY_BARS,
+    rewardMultiple: DEFAULT_REWARD_MULTIPLE,
   };
 }
 
@@ -200,6 +204,12 @@ export function loadConfig(path = CONFIG_PATH): PaperConfig {
       raw.entryLimitExpiryBars >= 1
         ? Math.floor(raw.entryLimitExpiryBars)
         : base.entryLimitExpiryBars,
+    rewardMultiple:
+      typeof raw.rewardMultiple === "number" &&
+      Number.isFinite(raw.rewardMultiple) &&
+      raw.rewardMultiple > 0
+        ? raw.rewardMultiple
+        : base.rewardMultiple,
     flipLockBars: resolveFlipLockBars({
       cli: flipLockFromArgv(process.argv),
       env: process.env.FLIP_LOCK_BARS,

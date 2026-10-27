@@ -80,9 +80,9 @@ py -3 paper\ib_paper_loop.py --dry-run --port 4002
 
 網頁 Preset 入面嘅 **Eve 20:30–23:59 · stop2 asym · 2.5R+EMA** 只係 replay 候選，唔會改呢度。Paper／IB 循環保持下面嘅日盤預設。
 
-- Filters：`0.45 / 2 / 15 / 1.2`  
+- Filters：`0.20 / 2 / 10 / 0.2`，`rewardMultiple` 30R（Phase C 複合最佳；Calmar ~370，MaxDD ~$1640）。本機 `paper/config.json` 如果寫死舊 filters／2.5R，要改先會跟住網頁；冇呢啲 key 就用程式預設。`config.example.json` 已更新。  
 - Session：`America/Chicago` **09:00–20:29** 先開新倉（session close 21:00；收市前 30 分鐘唔再開新倉）；**星期五 CT 14:45 起唔再開新倉**；已開倉照常管理／平倉  
-- Long 陽燭 impulse／Short 陰燭 impulse；目標 **2.5R**；收市穿 5 EMA 收窄到 **1R**（改 TP）  
+- Long 陽燭 impulse／Short 陰燭 impulse；目標 **30R**；收市穿 5 EMA 收窄到 **1R**（改 TP）  
 - 入場：**Limit@訊號收市**；訊號後 **2 根完結 1m bar** 仍未成交 → 取消 parent（未啟動嘅 TP／SL 一齊撤）；成交後止蝕／止賺 GTC 照留  
 - 會計用來回費 **$1.6**（只記帳；IB Paper 另有模擬費用）  
 - 合約：**MNQ · CME** front month（唔係 GLOBEX）

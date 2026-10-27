@@ -8,10 +8,10 @@
   "exchange": "CME",
   "currency": "USD",
   "filters": {
-    "bodyRatio": 0.45,
+    "bodyRatio": 0.2,
     "minBody": 2,
-    "volLen": 15,
-    "volMult": 1.2
+    "volLen": 10,
+    "volMult": 0.2
   },
   "roundTripFeeUsd": 1.6,
   "pointValue": 2,
@@ -21,7 +21,7 @@
   "placeOrders": false,
   "warmupBars": 400,
   "limitOffsetTicks": 0,
-  "rewardMultiple": 2.5,
+  "rewardMultiple": 30,
   "entryLimitExpiryBars": 2,
   "flipLockBars": 0
 }

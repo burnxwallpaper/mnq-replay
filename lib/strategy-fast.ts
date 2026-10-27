@@ -22,6 +22,8 @@ export type FastLeg = {
   kind: "day" | "eve";
   side: "long" | "short";
   filters: FastFilters;
+  /** Initial TP in R (daytime default 30; eve stays 2.5). */
+  rewardMultiple: number;
 };
 
 type OpenTrade = ScriptTrade;
@@ -90,7 +92,8 @@ function signalOf(
   }
   const risk = spec.side === "long" ? Math.max(bar.c - bar.l, 1) : Math.max(bar.h - bar.c, 1);
   const stop = spec.side === "long" ? bar.l : bar.h;
-  const target = spec.side === "long" ? bar.c + risk * 2.5 : bar.c - risk * 2.5;
+  const r = spec.rewardMultiple;
+  const target = spec.side === "long" ? bar.c + risk * r : bar.c - risk * r;
   return { stop, target, risk: null };
 }
 
