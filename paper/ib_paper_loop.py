@@ -8,8 +8,8 @@ Architecture:
   - Live 1m stream via reqHistoricalData(..., keepUpToDate=True)
     (reqRealTimeBars is 5-second only; keepUpToDate is the 1m path for MNQ)
   - On each *completed* bar: rolling indicators → signal / EMA exit → orders
-  - EMA adverse close → market flatten at (approx) that close (matches web exit@close;
-    no same-bar OHLC 1R look-ahead). Far TP + stop still work until then.
+  - EMA adverse close → if MTM already ≥1R, market flatten at close; else tighten TP to 1R
+    (matches web emaTighten1R_honest; no signal-bar OHLC 1R look-ahead). Far TP + stop until then.
   - Never re-downloads full history every minute
 
 Safety:
@@ -20,8 +20,8 @@ Safety:
   - A working Paper entry stays tracked until the parent fills, the parent is cancelled,
     or that limit expires. An empty positions() snapshot is not a cancel (fills lag it).
   - maxContracts defaults to 1
-  - EMA exit cancels the working bracket and submits a market flatten (Paper).
-    Dry-run books the exit at the completed bar's close.
+  - EMA ≥1R exit cancels the bracket and market-flattens (Paper); otherwise TP modify to 1R.
+    Dry-run books ≥1R exits at the completed bar's close.
   - Daytime flip lock (default 0, off): set above 0 to block opposite-side
     entries for that many completed 1m bars after a full stop. Same side stays
     allowed. Shared by long and short when side=both. Paper sockets only.
@@ -428,8 +428,8 @@ class Signal:
 @dataclass
 class EvalResult:
     signal: Optional[Signal] = None
-    tighten_target: Optional[float] = None  # legacy 1R (unused when ema_exit_close)
-    ema_exit_close: bool = False  # EMA adverse at close → flatten now
+    tighten_target: Optional[float] = None  # 1R TP when EMA adverse but close not yet ≥1R
+    ema_exit_close: bool = False  # EMA adverse AND already ≥1R at close → flatten now
 
 
 def evaluate_bar(
@@ -447,12 +447,23 @@ def evaluate_bar(
     ema5 = ema5_list[index]
     avg_vol = sma_at(volumes, index, filters.volLen)
 
-    # Manage open: EMA adverse close → exit at close (live/MOC intent)
+    # Manage open: Boss live EMA→1R honest.
+    # Adverse EMA at close: if already ≥1R → flatten at close; else arm 1R TP once (next bars).
     if open_trade is not None and ema5 is not None:
         if open_trade.side == "long" and bar.c < ema5:
-            return EvalResult(ema_exit_close=True)
+            one_r = open_trade.entry + open_trade.risk
+            if bar.c >= one_r:
+                return EvalResult(ema_exit_close=True)
+            if not open_trade.tightened:
+                return EvalResult(tighten_target=one_r)
+            return EvalResult()
         if open_trade.side == "short" and bar.c > ema5:
-            return EvalResult(ema_exit_close=True)
+            one_r = open_trade.entry - open_trade.risk
+            if bar.c <= one_r:
+                return EvalResult(ema_exit_close=True)
+            if not open_trade.tightened:
+                return EvalResult(tighten_target=one_r)
+            return EvalResult()
         return EvalResult()
 
     if open_trade is not None:
@@ -1170,7 +1181,7 @@ class PaperLoop:
 
         if result.ema_exit_close and self.state.open and self.state.open.entry_filled:
             Log.info(
-                "EMA EXIT %s @ close %.2f (market/MOC)",
+                "EMA EXIT %s @ close %.2f (already ≥1R; market/MOC)",
                 self.state.open.side,
                 bar.c,
             )
@@ -1179,6 +1190,27 @@ class PaperLoop:
                 return
             if not self._flatten_market_ema(float(bar.c), int(bar.ts)):
                 Log.warning("EMA EXIT market flatten failed; will retry next bar")
+            return
+
+        if result.tighten_target is not None and self.state.open and self.state.open.entry_filled:
+            new_tp = round_to_tick(result.tighten_target, self._tick)
+            Log.info(
+                "TIGHTEN %s target %.2f -> %.2f (1R)",
+                self.state.open.side,
+                self.state.open.target,
+                new_tp,
+            )
+            if self.place_orders and not self._modify_take_profit(new_tp):
+                # IB still has the previous limit. Leaving tightened false
+                # lets a later bar retry. Do not pretend the TP moved.
+                Log.warning(
+                    "TIGHTEN not applied %s IB target stays %.2f",
+                    self.state.open.side,
+                    self.state.open.target,
+                )
+                return
+            self.state.open.target = new_tp
+            self.state.open.tightened = True
             return
 
         if result.signal is None:

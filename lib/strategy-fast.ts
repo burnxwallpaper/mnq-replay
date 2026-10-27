@@ -96,12 +96,25 @@ function signalOf(
   return { stop, target, risk: null };
 }
 
-/** Non-null when EMA is adverse at close — caller exits at bar.c (live/MOC). */
-function tightenTarget(spec: FastLeg, bar: OhlcvBar, pos: OpenTrade, emaValue: number): number | null {
+/**
+ * Boss live EMA manage (honest):
+ * - adverse EMA at close AND already ≥1R at close → exit@close
+ * - adverse EMA otherwise → schedule 1R TP for next bar (no signal-bar OHLC 1R fill)
+ */
+type EmaManage =
+  | { kind: "exitClose" }
+  | { kind: "schedule1R"; price: number }
+  | null;
+
+function emaManageAction(spec: FastLeg, bar: OhlcvBar, pos: OpenTrade, emaValue: number): EmaManage {
   if (pos.side !== spec.side) return null;
   const crossed = spec.side === "long" ? bar.c < emaValue : bar.c > emaValue;
   if (!crossed) return null;
-  return bar.c;
+  const oneR =
+    spec.side === "long" ? pos.entryPrice + pos.riskPoints : pos.entryPrice - pos.riskPoints;
+  const already1R = spec.side === "long" ? bar.c >= oneR : bar.c <= oneR;
+  if (already1R) return { kind: "exitClose" };
+  return { kind: "schedule1R", price: oneR };
 }
 
 /**
@@ -219,12 +232,14 @@ export function runGeneratedLegs(
           leg.pendingTightenTarget = null;
           continue;
         }
-        // Live-like: EMA adverse close → exit at this bar's close (no OHLC look-ahead).
-        const emaExit = tightenTarget(leg.spec, bar, pos, emaValue);
-        if (emaExit !== null) {
+        // Honest EMA→1R: ≥1R at close → exit@close; else schedule 1R next bar.
+        const emaAct = emaManageAction(leg.spec, bar, pos, emaValue);
+        if (emaAct?.kind === "exitClose") {
           pushExit(leg, pos, i, { price: bar.c, reason: "target" });
           leg.open = null;
           leg.pendingTightenTarget = null;
+        } else if (emaAct?.kind === "schedule1R") {
+          leg.pendingTightenTarget = emaAct.price;
         }
         continue;
       }
@@ -240,11 +255,14 @@ export function runGeneratedLegs(
             pushExit(leg, pos, i, exit);
             continue;
           }
-          // Fill bar close is known: EMA adverse → exit@close (same as open-leg path).
-          const emaExit = tightenTarget(leg.spec, bar, pos, emaValue);
-          if (emaExit !== null) {
+          // Fill bar: same honest EMA→1R rule as open-leg path.
+          const emaAct = emaManageAction(leg.spec, bar, pos, emaValue);
+          if (emaAct?.kind === "exitClose") {
             pushExit(leg, pos, i, { price: bar.c, reason: "target" });
             continue;
+          }
+          if (emaAct?.kind === "schedule1R") {
+            leg.pendingTightenTarget = emaAct.price;
           }
           leg.open = pos;
           continue;
