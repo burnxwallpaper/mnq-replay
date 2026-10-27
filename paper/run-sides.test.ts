@@ -84,8 +84,9 @@ test("resolveFlipLockBars prefers CLI, then env, then config, and keeps 0", () =
   assert.equal(resolveFlipLockBars({ cli: "0", env: "8", config: 15 }), 0);
   assert.equal(resolveFlipLockBars({ cli: "  ", env: "8", config: 15 }), 8);
   assert.equal(resolveFlipLockBars({ env: "", config: 0 }), 0);
-  assert.equal(resolveFlipLockBars({ config: undefined }), 15);
-  assert.equal(resolveFlipLockBars({ config: "nope" }), 15);
+  assert.equal(resolveFlipLockBars({ config: undefined }), 0);
+  assert.equal(resolveFlipLockBars({ config: "nope" }), 0);
+  assert.equal(resolveFlipLockBars({ config: 15 }), 15);
 });
 
 test("loadConfig reads flipLockBars and lets FLIP_LOCK_BARS override it", () => {

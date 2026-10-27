@@ -52,11 +52,11 @@ Gateway Paper 維持 **4002**。API 跌咗唔使再人手重開：循環會用�
 py -3 paper\ib_paper_loop.py --dry-run --host 127.0.0.1 --port 4002 --max-bars 2
 ```
 
-**Flip lock（預設 15；0 = 關）。** CLI 優先於環境變數，環境變數優先於 `config.json` 嘅 `flipLockBars`：
+**Flip lock（預設 0，關閉）。** 設成大於 0 先會喺完整止蝕之後鎖對面。CLI 優先於環境變數，環境變數優先於 `config.json` 嘅 `flipLockBars`：
 
 ```bat
 py -3 paper\ib_paper_loop.py --dry-run --port 4002 --flip-lock-bars 15
-set FLIP_LOCK_BARS=0
+set FLIP_LOCK_BARS=15
 py -3 paper\ib_paper_loop.py --dry-run --port 4002
 ```
 
@@ -86,7 +86,7 @@ py -3 paper\ib_paper_loop.py --dry-run --port 4002
 - 入場：**Limit@訊號收市**；訊號後 **2 根完結 1m bar** 仍未成交 → 取消 parent（未啟動嘅 TP／SL 一齊撤）；成交後止蝕／止賺 GTC 照留  
 - 會計用來回費 **$1.6**（只記帳；IB Paper 另有模擬費用）  
 - 合約：**MNQ · CME** front month（唔係 GLOBEX）
-- **Flip lock 15（同網頁）**：完整止蝕（stop）之後，對面新倉封鎖接下來 15 根完成嘅 1m bar（訊號 bar 喺 E+1 … E+15）；同方向仍可開；止賺唔鎖；止蝕嗰根 bar 上面嘅訊號仍可開。`0` 關閉。`side=both`（預設）先啟用，long／short 共用 `state.json` 入面同一組 `flip_locks`。單邊 `side=long` 或 `short` 唔鎖，同網頁只開一邊一樣。覆寫：`--flip-lock-bars`、環境變數 `FLIP_LOCK_BARS`、或 `config.json` 嘅 `flipLockBars`（CLI > env > config）。Warmup 會用同一套單倉規則重建鎖；Ctrl+C 之後鎖會留喺 `state.json`。
+- **Flip lock（預設 0，同網頁）**：預設關閉。設成 N（例如 15）之後，完整止蝕（stop）會封鎖對面新倉接下來 N 根完成嘅 1m bar（訊號 bar 喺 E+1 … E+N）；同方向仍可開；止賺唔鎖；止蝕嗰根 bar 上面嘅訊號仍可開。`0` 關閉。`side=both`（預設）先啟用，long／short 共用 `state.json` 入面同一組 `flip_locks`。單邊 `side=long` 或 `short` 唔鎖，同網頁只開一邊一樣。覆寫：`--flip-lock-bars`、環境變數 `FLIP_LOCK_BARS`、或 `config.json` 嘅 `flipLockBars`（CLI > env > config）。Warmup 會用同一套單倉規則重建鎖；Ctrl+C 之後鎖會留喺 `state.json`。
 
 
 ### 常見阻礙
@@ -145,15 +145,15 @@ py -3 paper\ib_paper_loop.py --place-orders --host 127.0.0.1 --port 4002
 | Paper orders | `py -3 paper\ib_paper_loop.py --place-orders --host 127.0.0.1 --port 4002` | Limit at the signal close + bracket stop/target on the **Paper** account. Size `maxContracts` (default 1). Unfilled entry cancels after 2 completed 1m bars. |
 | Smoke | `py -3 paper\ib_paper_loop.py --dry-run --port 4002 --max-bars 2` | Stop after two completed stream bars. |
 
-Flip lock matches the web daytime helper (`noteStopFlipLock` / `isOppositeFlipLocked`): after a **full stop**, block a new **opposite** entry for the next **15** completed 1-minute bars. Same-side entries stay allowed. A target exit does not lock. A signal on the stop bar itself is still allowed. `0` turns the lock off. It is shared by long and short, and it is active only when `side` is `both` (the default). Override, first match wins:
+Flip lock matches the web daytime helper (`noteStopFlipLock` / `isOppositeFlipLocked`). The default is **0** (off). Set it above 0 to block a new **opposite** entry for that many completed 1-minute bars after a **full stop**. Same-side entries stay allowed. A target exit does not lock. A signal on the stop bar itself is still allowed. It is shared by long and short, and it is active only when `side` is `both` (the default). Override, first match wins:
 
 ```bat
 py -3 paper\ib_paper_loop.py --place-orders --port 4002 --flip-lock-bars 15
-set FLIP_LOCK_BARS=0
+set FLIP_LOCK_BARS=15
 py -3 paper\ib_paper_loop.py --dry-run --port 4002
 ```
 
-`config.json` key: `"flipLockBars": 15`.
+`config.json` key: `"flipLockBars": 0`.
 
 If the API drops, the loop reconnects the same host, port, and clientId with backoff (1s, 2s, 4s, … capped at 30s) until Ctrl+C or SIGTERM. It qualifies MNQ again, resubscribes to 1m `keepUpToDate`, and reloads `state.json` so an open bracket and flip locks are kept. It does not send a second bracket when that state already has order ids. Logs: `Disconnect detected`, `Reconnect attempt N`, `Reconnect succeeded`. Live ports stay refused unless `allowLive` is set.
 
@@ -168,7 +168,7 @@ Ctrl+C writes `paper/state.json` (including `flip_locks`) and disconnects. Resti
 
 Connection check only (no strategy, no orders): `py -3 paper/ib_paper_stub.py --port 4002`.
 
-Local bars, no Gateway: `npm run paper:local` and `npm run paper:forward`. Both call the web engine's linked runner, so long and short share the same lock. `FLIP_LOCK_BARS=0` or `npx tsx paper/local-runner.ts --flip-lock-bars 0` turns it off.
+Local bars, no Gateway: `npm run paper:local` and `npm run paper:forward`. Both call the web engine's linked runner, so long and short share the same lock. The default is 0 (off). `FLIP_LOCK_BARS=15` or `npx tsx paper/local-runner.ts --flip-lock-bars 15` turns it on.
 
 - **Bars:** 1m via historical `keepUpToDate` (not 5s realtime bars).
 - **Preset:** the replay page can load an optional Eve candidate. This loop stays on the daytime default above.

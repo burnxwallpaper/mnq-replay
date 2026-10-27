@@ -71,12 +71,13 @@ function runPair(
 }
 
 test("normalizeFlipLockBars keeps 0 as off and falls back when the value is unusable", () => {
-  assert.equal(DEFAULT_FLIP_LOCK_BARS, 15);
+  assert.equal(DEFAULT_FLIP_LOCK_BARS, 0);
   assert.equal(normalizeFlipLockBars(0), 0);
   assert.equal(normalizeFlipLockBars("0"), 0);
   assert.equal(normalizeFlipLockBars(15.4), 15);
-  assert.equal(normalizeFlipLockBars(-3), 15);
-  assert.equal(normalizeFlipLockBars("nope"), 15);
+  assert.equal(normalizeFlipLockBars(-3), 0);
+  assert.equal(normalizeFlipLockBars("nope"), 0);
+  assert.equal(normalizeFlipLockBars(-3, 15), 15);
   assert.equal(normalizeFlipLockBars(-3, 0), 0);
 });
 
@@ -94,12 +95,12 @@ test("flip lock blocks the opposite side for the next 15 signal bars after a sto
   assert.equal(shortRun.markers.some((marker) => marker.kind === "signal" && marker.barIndex === 22), true);
 });
 
-test("linked runner defaults to flip lock 15", () => {
+test("linked runner defaults to flip lock off", () => {
   const bars = series(30, { 6: { l: 97 } });
   const { shortRun } = runPair(bars, [5], [7, 22], undefined);
   assert.deepEqual(
     shortRun.trades.map((trade) => trade.signalIndex),
-    [22],
+    [7],
   );
 });
 

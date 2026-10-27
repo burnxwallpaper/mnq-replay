@@ -556,7 +556,7 @@ export function ReplayWorkspace() {
         <p id="strategy-runners-help" className="text-xs text-muted-foreground">
           {presetId === "eve"
             ? "Eve candidate: CT 20:30–23:59 only, vstrict 0.7/6/20×2.2, stop 2× risk1, target and EMA→1R still use risk1. Combined long+short. Daytime stays the default when you switch back."
-            : `Daytime default: CT 09:00–20:29, Fri no new entries from 14:45, filters 0.45/2/15×1.2, stop at the bar extreme, flip lock ${flipLockBars} (after a full stop, no new opposite-side entry for the next ${flipLockBars} 1m bars; 0 = off, Save to apply). Long and Short share that lock when both are checked.`}
+            : `Daytime default: CT 09:00–20:29, Fri no new entries from 14:45, filters 0.45/2/15×1.2, stop at the bar extreme, flip lock ${flipLockBars} (0 = off; above 0 blocks a new opposite-side entry for that many 1m bars after a full stop, Save to apply). Long and Short share that lock when both are checked.`}
         </p>
         {presetId === "eve" ? (
           <p id="strategy-preset-note" className="text-xs text-muted-foreground">
@@ -769,9 +769,9 @@ export function ReplayWorkspace() {
         The Preset menu chooses Daytime (default) or the parked Eve candidate. Check Long
         and/or Short above the chart to run them. The editor edits the Long leg; Short follows
         the active preset. Equity shows one line per strategy plus Combined when both are on.
-        Daytime flip lock (default 15 one-minute bars, 0 = off) blocks a new opposite-side
-        entry after a full stop, and only while both runners are on. Replay only moves the
-        cursor. The paper/IB loop uses this same lock when both sides are on.
+        Daytime flip lock defaults to 0 (off). Set Flip lock bars above 0 and Save to block a
+        new opposite-side entry after a full stop, and only while both runners are on. Replay
+        only moves the cursor. The paper/IB loop uses this same lock when both sides are on.
       </p>
     </main>
   );

@@ -8,7 +8,8 @@ those TypeScript helpers and fails if the two disagree.
 After a full stop at bar E, a new entry on the opposite side is rejected when
 its signal bar is E+1 through E+N inclusive. The signal bar that stopped out
 is still allowed. Same-side entries stay allowed. A target exit does not lock.
-N defaults to 15. 0 disables the lock. One lock list is shared by long and short.
+N defaults to 0, which leaves the lock off. A value above 0 blocks for that many bars.
+One lock list is shared by long and short.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Protocol, Sequence
 
-DEFAULT_FLIP_LOCK_BARS = 15
+DEFAULT_FLIP_LOCK_BARS = 0
 MAX_FLIP_LOCK_BARS = 5000
 
 

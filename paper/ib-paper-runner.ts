@@ -40,7 +40,7 @@ function main() {
   console.log("  3. Dry-run (no orders): py -3 paper/ib_paper_loop.py --dry-run --host 127.0.0.1 --port 4002");
   console.log("  4. Paper orders:        py -3 paper/ib_paper_loop.py --place-orders --host 127.0.0.1 --port 4002");
   console.log("Daytime session CT 09:00–20:29, Fri no new entries from 14:45, last 30m blocked,");
-  console.log("2.5R / EMA→1R, entry limit expires after 2 completed 1m bars, flip lock default 15.");
+  console.log("2.5R / EMA→1R, entry limit expires after 2 completed 1m bars, flip lock default 0 (off).");
   console.log("NEVER point this at live port 7496 or 4001.");
 }
 

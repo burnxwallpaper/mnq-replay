@@ -24,14 +24,14 @@ Safety:
     10326 and 10327 are hard rejects: the live price and OCA stay put, and
     the log does not say Modified. The stop stays in the original OCA group.
     target/tightened update only after that modify is accepted.
-  - Daytime flip lock (default 15): after a full stop, block opposite-side entries
-    for the next 15 completed 1m bars. Same side stays allowed. 0 disables.
-    Shared by long and short when side=both. Paper sockets only.
+  - Daytime flip lock (default 0, off): set above 0 to block opposite-side
+    entries for that many completed 1m bars after a full stop. Same side stays
+    allowed. Shared by long and short when side=both. Paper sockets only.
 
 Usage (Windows, Gateway Paper open on 4002 — not live 4001/7496):
   py -3 paper/ib_paper_loop.py --dry-run --host 127.0.0.1 --port 4002
   py -3 paper/ib_paper_loop.py --place-orders --host 127.0.0.1 --port 4002
-  py -3 paper/ib_paper_loop.py --place-orders --flip-lock-bars 0
+  py -3 paper/ib_paper_loop.py --place-orders --flip-lock-bars 15  # optional; default is 0 (off)
   Ctrl+C / SIGTERM to stop (brackets left for the kill-switch docs)
 
 If the Gateway API drops, the loop reconnects the same host, port, and clientId
@@ -180,7 +180,7 @@ class Config:
     limitOffsetTicks: float = 0.0  # 0 = limit at bar close; MNQ tick=0.25
     rewardMultiple: float = 2.5  # initial TP in R; EMA may tighten to 1R
     entryLimitExpiryBars: int = 2  # cancel unfilled entry after N completed 1m bars
-    # Opposite-side lock after a full stop. 15 matches the web daytime default. 0 disables.
+    # Opposite-side lock after a full stop. 0 matches the web daytime default (off).
     flipLockBars: int = DEFAULT_FLIP_LOCK_BARS
 
 
@@ -1901,7 +1901,7 @@ def parse_args() -> argparse.Namespace:
         "--flip-lock-bars",
         default=None,
         help="Opposite-side lock after a full stop, in completed 1m bars. "
-        "Default 15 (daytime). 0 disables. Overrides FLIP_LOCK_BARS and config.json.",
+        "Default 0 (off). Set above 0 to enable. Overrides FLIP_LOCK_BARS and config.json.",
     )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
