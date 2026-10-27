@@ -112,7 +112,7 @@ export const EMA_EXIT_DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This 
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
 // Entry fills at the signal close. One position at a time.
-// Impulse entries still target 2R. A close below the 5 EMA tightens that to 1R.
+// Impulse entries still target 2R. A close below the 5 EMA schedules a tighten to 1R from the next bar.
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "long" && bar.c < ema5) {
@@ -143,7 +143,7 @@ export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FI
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close below the 5 EMA tightens that to 1R.
+// Impulse entries still target 2.5R. A close below the 5 EMA schedules a tighten to 1R from the next bar.
 // New longs only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
@@ -174,7 +174,7 @@ export function buildShortStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_F
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { target } to tighten, or null.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close above the 5 EMA tightens that to 1R.
+// Impulse entries still target 2.5R. A close above the 5 EMA schedules a tighten to 1R from the next bar.
 // New shorts only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
@@ -222,7 +222,7 @@ function buildEveLegScript(side: "long" | "short", filters: EntryFilters): strin
 // MNQ 1-minute ${side} impulse. Entries only America/Chicago 20:30–23:59 (not the rest of the overnight session).
 // vstrict filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 // stopMult=2 asym: risk1 = max(|close - ${extremeName}|, 1); stop is 2×risk1 from the close.
-// Target is 2.5× risk1. A 5 EMA cross tightens the target to 1× risk1 (position.risk), not to the widened stop.
+// Target is 2.5× risk1. A 5 EMA cross schedules a tighten to 1× risk1 (position.risk) from the next bar, not to the widened stop.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
 // Pair with the other Eve leg for combined long+short. Fee $1.6 and 1 contract are app settings.
 // Snapshot on the 41581-bar file (not live truth): ~$10642 final asset · MaxDD $185 · WR 69% · n=62.
@@ -507,6 +507,8 @@ type StrategyLeg = {
   trades: ScriptTrade[];
   open: ScriptTrade | null;
   pending: PendingEntry | null;
+  /** EMA→1R (or script target) scheduled on a prior bar; applied at bar start. */
+  pendingTightenTarget: number | null;
 };
 
 /** Append a lock when a trade exits on a full stop. Target exits and `flipLockBars <= 0` do nothing. */
@@ -693,6 +695,7 @@ export function runLinkedStrategyScripts(
         trades: [],
         open: null,
         pending: null,
+        pendingTightenTarget: null,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Script failed to compile.";
@@ -759,6 +762,12 @@ export function runLinkedStrategyScripts(
     for (const leg of legs) {
       if (leg.open !== null) {
         const pos = leg.open;
+        // Honest EMA→1R / script tighten: apply a target scheduled on a prior close
+        // before resolving this bar. Never fill the new target on the signal bar OHLC.
+        if (leg.pendingTightenTarget !== null) {
+          pos.targetPrice = leg.pendingTightenTarget;
+          leg.pendingTightenTarget = null;
+        }
         const stopped = pos.side === "long" ? bar.l <= pos.stopPrice : bar.h >= pos.stopPrice;
         const targeted = pos.side === "long" ? bar.h >= pos.targetPrice : bar.l <= pos.targetPrice;
         if (!stopped && !targeted) {
@@ -776,12 +785,13 @@ export function runLinkedStrategyScripts(
             return { ok: false, error: `${leg.id}: Bar ${i + 1}: ${message}` };
           }
           const nextTarget = readTarget(managed);
-          if (nextTarget !== null) pos.targetPrice = nextTarget;
+          if (nextTarget !== null) leg.pendingTightenTarget = nextTarget;
         }
         const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
         if (exit) {
           pushExit(leg, pos, i, exit);
           leg.open = null;
+          leg.pendingTightenTarget = null;
         }
         continue;
       }

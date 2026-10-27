@@ -134,7 +134,8 @@ test("eve stop is 2× risk1 while stored risk, target, and EMA→1R stay on risk
 });
 
 test("explicit signal risk is what EMA→1R uses when the stop is wider", () => {
-  const closes = [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 90];
+  // Extra bar after the EMA-cross close so next-bar tighten can apply (no same-bar look-ahead).
+  const closes = [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 90, 90];
   const bars: OhlcvBar[] = closes.map((close, index) => ({
     ts: Date.UTC(2026, 9, 26, 15, index),
     o: close,

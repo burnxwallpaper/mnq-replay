@@ -42,6 +42,8 @@ type LegState = {
   trades: ScriptTrade[];
   open: OpenTrade | null;
   pending: PendingEntry | null;
+  /** EMA→1R price scheduled on a prior bar; applied at the start of this bar. */
+  pendingTightenTarget: number | null;
   volSum: number;
 };
 
@@ -133,6 +135,7 @@ export function runGeneratedLegs(
     trades: [],
     open: null,
     pending: null,
+    pendingTightenTarget: null,
     volSum: 0,
   }));
   const locks: FlipLock[] = [];
@@ -202,16 +205,23 @@ export function runGeneratedLegs(
 
       if (leg.open !== null) {
         const pos = leg.open;
+        // Honest EMA→1R: apply a tighten scheduled on a prior close before this bar's exits.
+        if (leg.pendingTightenTarget !== null) {
+          pos.targetPrice = leg.pendingTightenTarget;
+          leg.pendingTightenTarget = null;
+        }
         const stopped = pos.side === "long" ? bar.l <= pos.stopPrice : bar.h >= pos.stopPrice;
         const targeted = pos.side === "long" ? bar.h >= pos.targetPrice : bar.l <= pos.targetPrice;
         if (!stopped && !targeted) {
           const nextTarget = tightenTarget(leg.spec, bar, pos, emaValue);
-          if (nextTarget !== null) pos.targetPrice = nextTarget;
+          // Schedule only — do not fill 1R on the signal bar's OHLC (look-ahead).
+          if (nextTarget !== null) leg.pendingTightenTarget = nextTarget;
         }
         const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
         if (exit) {
           pushExit(leg, pos, i, exit);
           leg.open = null;
+          leg.pendingTightenTarget = null;
         }
         continue;
       }

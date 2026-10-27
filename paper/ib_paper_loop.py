@@ -8,6 +8,8 @@ Architecture:
   - Live 1m stream via reqHistoricalData(..., keepUpToDate=True)
     (reqRealTimeBars is 5-second only; keepUpToDate is the 1m path for MNQ)
   - On each *completed* bar: rolling indicators → signal / EMA tighten → orders
+  - EMA→1R: evaluated at bar close; TP modify applies afterward, so fills use later
+    bars only (matches web next-bar tighten; no same-bar OHLC look-ahead).
   - Never re-downloads full history every minute
 
 Safety:
