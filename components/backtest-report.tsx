@@ -1,3 +1,8 @@
+"use client";
+
+import { useEffect, useRef, useState, type PointerEvent } from "react";
+import { equityAt, equityAxisTicks } from "@/lib/equity-axis";
+import { formatFixtureTime } from "@/lib/fixture-bars";
 import type {
   BacktestStats,
   EquityPoint,
@@ -5,6 +10,12 @@ import type {
   MultiBacktestReport,
 } from "@/lib/strategy-script";
 import { STARTING_NET_ASSET } from "@/lib/strategy-script";
+
+const CHART_WIDTH = 640;
+const CHART_PAD_X = 6;
+const CHART_PAD_Y = 10;
+const PLOT_BOTTOM = 148;
+const CHART_HEIGHT = 168;
 
 /** Absolute net-asset dollars (no forced +). */
 function formatAsset(value: number) {
@@ -46,14 +57,6 @@ function formatMinutes(ms: number) {
   return `${minutes.toFixed(1)} min`;
 }
 
-function shortDate(ts: number) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "UTC",
-    month: "short",
-    day: "numeric",
-  }).format(new Date(ts));
-}
-
 function linePath(
   points: EquityPoint[],
   xOf: (ts: number) => number,
@@ -70,10 +73,33 @@ function linePath(
 }
 
 function EquityGraph({ series }: { series: EquitySeries[] }) {
-  const width = 640;
-  const height = 148;
-  const padX = 6;
-  const padY = 10;
+  const width = CHART_WIDTH;
+  const height = CHART_HEIGHT;
+  const padX = CHART_PAD_X;
+  const padY = CHART_PAD_Y;
+  const plotBottom = PLOT_BOTTOM;
+  const frameRef = useRef<HTMLDivElement>(null);
+  const [innerPx, setInnerPx] = useState(280);
+  const [hover, setHover] = useState<{
+    ts: number;
+    x: number;
+    rows: { id: string; name: string; color: string; value: number }[];
+  } | null>(null);
+
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const measure = () => {
+      const scale = frame.clientWidth / width;
+      const next = Math.max(0, (width - padX * 2) * scale);
+      setInnerPx((prev) => (Math.abs(prev - next) < 1 ? prev : next));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, [padX, width]);
+
   let min = Number.POSITIVE_INFINITY;
   let max = Number.NEGATIVE_INFINITY;
   let t0 = Number.POSITIVE_INFINITY;
@@ -102,7 +128,7 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
   const xOf = (ts: number) =>
     span <= 0 ? padX : padX + ((ts - t0) / span) * (width - padX * 2);
   const yOf = (value: number) =>
-    padY + (1 - (value - min) / (max - min)) * (height - padY * 2);
+    padY + (1 - (value - min) / (max - min)) * (plotBottom - padY * 2);
   const baselineY = yOf(STARTING_NET_ASSET);
   const primary = series.find((item) => item.id === "combined") ?? series[0];
   const areaLine = primary ? linePath(primary.equity, xOf, yOf) : "";
@@ -110,52 +136,134 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
     primary && primary.equity.length > 0 && areaLine
       ? `${areaLine} L ${xOf(primary.equity[primary.equity.length - 1].ts).toFixed(1)} ${baselineY.toFixed(1)} L ${xOf(primary.equity[0].ts).toFixed(1)} ${baselineY.toFixed(1)} Z`
       : "";
+  const ticks = equityAxisTicks(t0, t1, innerPx);
+
+  const onPointerMove = (event: PointerEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const x = ((event.clientX - rect.left) / rect.width) * width;
+    const inner = width - padX * 2;
+    const fraction = inner <= 0 ? 0 : (x - padX) / inner;
+    const clamped = Math.min(1, Math.max(0, fraction));
+    const raw = t0 + clamped * span;
+    const snapped =
+      span <= 0 ? t0 : Math.min(t1, Math.max(t0, Math.round(raw / 60_000) * 60_000));
+    const rows: { id: string; name: string; color: string; value: number }[] = [];
+    for (const item of series) {
+      const value = equityAt(item.equity, snapped);
+      if (value === null) continue;
+      rows.push({ id: item.id, name: item.name, color: item.color, value });
+    }
+    setHover((prev) => (prev && prev.ts === snapped ? prev : { ts: snapped, x: xOf(snapped), rows }));
+  };
 
   return (
-    <svg
-      id="equity-chart"
-      viewBox={`0 0 ${width} ${height}`}
-      className="h-36 w-full"
-      role="img"
-      aria-label={`Net asset curves ending ${formatAsset(primary?.endingEquity ?? STARTING_NET_ASSET)}`}
-    >
-      <line
-        x1={padX}
-        x2={width - padX}
-        y1={baselineY}
-        y2={baselineY}
-        stroke="rgba(213,222,234,0.35)"
-        strokeDasharray="3 3"
-      />
-      {area ? <path d={area} fill={primary?.color ?? "#3dd68c"} opacity={0.12} /> : null}
-      {series.map((item) => {
-        const d = linePath(item.equity, xOf, yOf);
-        if (!d) return null;
-        return (
-          <path
-            key={item.id}
-            id={`equity-line-${item.id}`}
-            d={d}
-            fill="none"
-            stroke={item.color}
-            strokeWidth={item.id === "combined" ? 2.4 : 2}
-            strokeDasharray={item.id === "combined" ? "6 3" : undefined}
-          />
-        );
-      })}
-      <text x={padX} y={12} fill="#9aa8b8" fontSize={11} fontFamily="ui-monospace, monospace">
-        {formatAsset(max)}
-      </text>
-      <text
-        x={padX}
-        y={height - 2}
-        fill="#9aa8b8"
-        fontSize={11}
-        fontFamily="ui-monospace, monospace"
+    <div ref={frameRef} id="equity-chart-frame" className="relative">
+      <svg
+        id="equity-chart"
+        viewBox={`0 0 ${width} ${height}`}
+        className="h-44 w-full cursor-crosshair"
+        role="img"
+        aria-label={`Net asset curves ending ${formatAsset(primary?.endingEquity ?? STARTING_NET_ASSET)}`}
+        onPointerMove={onPointerMove}
+        onPointerLeave={() => setHover(null)}
       >
-        {formatAsset(min)}
-      </text>
-    </svg>
+        <line
+          x1={padX}
+          x2={width - padX}
+          y1={baselineY}
+          y2={baselineY}
+          stroke="rgba(213,222,234,0.35)"
+          strokeDasharray="3 3"
+        />
+        <line
+          x1={padX}
+          x2={width - padX}
+          y1={plotBottom}
+          y2={plotBottom}
+          stroke="rgba(213,222,234,0.28)"
+        />
+        {ticks.map((tick) => (
+          <line
+            key={`tick-${tick.ts}`}
+            x1={xOf(tick.ts)}
+            x2={xOf(tick.ts)}
+            y1={plotBottom}
+            y2={plotBottom + 4}
+            stroke="rgba(154,168,184,0.7)"
+          />
+        ))}
+        {area ? <path d={area} fill={primary?.color ?? "#3dd68c"} opacity={0.12} /> : null}
+        {series.map((item) => {
+          const d = linePath(item.equity, xOf, yOf);
+          if (!d) return null;
+          return (
+            <path
+              key={item.id}
+              id={`equity-line-${item.id}`}
+              d={d}
+              fill="none"
+              stroke={item.color}
+              strokeWidth={item.id === "combined" ? 2.4 : 2}
+              strokeDasharray={item.id === "combined" ? "6 3" : undefined}
+            />
+          );
+        })}
+        {hover ? (
+          <line
+            x1={hover.x}
+            x2={hover.x}
+            y1={padY}
+            y2={plotBottom}
+            stroke="rgba(213,222,234,0.7)"
+            strokeDasharray="2 2"
+          />
+        ) : null}
+        <text x={padX} y={12} fill="#9aa8b8" fontSize={11} fontFamily="ui-monospace, monospace">
+          {formatAsset(max)}
+        </text>
+        <text
+          x={padX}
+          y={plotBottom - 4}
+          fill="#9aa8b8"
+          fontSize={11}
+          fontFamily="ui-monospace, monospace"
+        >
+          {formatAsset(min)}
+        </text>
+      </svg>
+      <div className="pointer-events-none absolute inset-x-0 bottom-0.5">
+        {ticks.map((tick) => {
+          const left = ((padX + tick.fraction * (width - padX * 2)) / width) * 100;
+          const translate =
+            tick.align === "start" ? "0" : tick.align === "end" ? "-100%" : "-50%";
+          return (
+            <span
+              key={`${tick.align}-${tick.ts}`}
+              className="absolute bottom-0 font-mono text-[11px] leading-none whitespace-nowrap text-[#9aa8b8]"
+              style={{ left: `${left}%`, transform: `translateX(${translate})` }}
+            >
+              {tick.label}
+            </span>
+          );
+        })}
+      </div>
+      {hover ? (
+        <div
+          id="equity-hover"
+          className="pointer-events-none absolute top-1 right-1 z-10 max-w-[min(100%,28rem)] rounded-sm bg-[rgba(18,21,28,0.88)] px-2 py-1 font-mono text-[11px] leading-4 text-[#d5deea] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]"
+        >
+          <div id="equity-hover-time" className="text-[#9aa8b8]">
+            {formatFixtureTime(hover.ts)}
+          </div>
+          {hover.rows.map((row) => (
+            <div key={row.id}>
+              <span style={{ color: row.color }}>{row.name}</span> {formatAsset(row.value)}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -290,8 +398,6 @@ export function BacktestReport({ report }: { report: MultiBacktestReport | null 
   }
 
   const { series, stats, perStrategy } = report;
-  const start = stats.equity[0];
-  const end = stats.equity[stats.equity.length - 1];
   const multi = perStrategy.length > 1;
   const combinedSeries = series.find((item) => item.id === "combined");
 
@@ -331,10 +437,6 @@ export function BacktestReport({ report }: { report: MultiBacktestReport | null 
         ))}
       </div>
       <EquityGraph series={series} />
-      <p className="flex justify-between font-mono text-[10px] text-muted-foreground">
-        <span>{start ? shortDate(start.ts) : "—"}</span>
-        <span>{end ? `${shortDate(end.ts)} UTC` : "—"}</span>
-      </p>
 
       <div id="asset-summaries" className="flex flex-col gap-3">
         {multi && combinedSeries ? (
