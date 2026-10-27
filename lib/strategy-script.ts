@@ -112,11 +112,13 @@ export const EMA_EXIT_DEFAULT_STRATEGY_SCRIPT = `// MNQ 1-minute strategy. This 
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { exit: true } to leave at close, { target } to schedule next-bar TP, or null.
 // Entry fills at the signal close. One position at a time.
-// Impulse entries still target 2R. A close below the 5 EMA exits at that bar's close (market/MOC).
+// Impulse entries still target 2R. Adverse 5 EMA close: if already ≥1R → exit@close; else schedule 1R TP next bar.
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "long" && bar.c < ema5) {
-  return { exit: true }
+  const oneR = position.entry + position.risk
+  if (bar.c >= oneR) return { exit: true }
+  return { target: oneR }
 }
 
 const avgVol = ta.sma(i, 20, "v")
@@ -143,13 +145,15 @@ export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FI
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { exit: true } to leave at close, { target } to schedule next-bar TP, or null.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close below the 5 EMA exits at that bar's close (market/MOC).
+// Impulse entries still target 2.5R. Adverse 5 EMA close: if already ≥1R → exit@close; else schedule 1R TP next bar (no same-bar OHLC 1R look-ahead).
 // New longs only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "long" && bar.c < ema5) {
-  return { exit: true }
+  const oneR = position.entry + position.risk
+  if (bar.c >= oneR) return { exit: true }
+  return { target: oneR }
 }
 
 // SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
@@ -174,13 +178,15 @@ export function buildShortStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_F
 // position: null, or { side, entry, stop, target, risk } while a trade is open
 // Return { signal: true, side, stop, target } to enter, { exit: true } to leave at close, { target } to schedule next-bar TP, or null.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close above the 5 EMA exits at that bar's close (market/MOC).
+// Impulse entries still target 2.5R. Adverse 5 EMA close: if already ≥1R → exit@close; else schedule 1R TP next bar (no same-bar OHLC 1R look-ahead).
 // New shorts only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
 // Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "short" && bar.c > ema5) {
-  return { exit: true }
+  const oneR = position.entry - position.risk
+  if (bar.c <= oneR) return { exit: true }
+  return { target: oneR }
 }
 
 // SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
@@ -215,6 +221,7 @@ function buildEveLegScript(side: "long" | "short", filters: EntryFilters): strin
   const targetExpr = bearish ? "bar.c - risk1 * 2.5" : "bar.c + risk1 * 2.5";
   const emaCmp = bearish ? "bar.c > ema5" : "bar.c < ema5";
   const emaTarget = bearish ? "position.entry - position.risk" : "position.entry + position.risk";
+  const already1R = bearish ? "bar.c <= oneR" : "bar.c >= oneR";
   const impulseCmp = bearish ? "<" : ">";
   const extremeName = bearish ? "high" : "low";
   return `// PRESET=eve-2030-2359
@@ -222,7 +229,7 @@ function buildEveLegScript(side: "long" | "short", filters: EntryFilters): strin
 // MNQ 1-minute ${side} impulse. Entries only America/Chicago 20:30–23:59 (not the rest of the overnight session).
 // vstrict filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
 // stopMult=2 asym: risk1 = max(|close - ${extremeName}|, 1); stop is 2×risk1 from the close.
-// Target is 2.5× risk1. A 5 EMA cross exits at that bar's close (market/MOC); R stats still use risk1, not the widened stop.
+// Target is 2.5× risk1. Adverse 5 EMA: if already ≥1R at close → exit@close; else schedule 1R TP next bar. R stats use risk1, not the widened stop.
 // Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
 // Pair with the other Eve leg for combined long+short. Fee $1.6 and 1 contract are app settings.
 // Snapshot on the 41581-bar file (not live truth): ~$10642 final asset · MaxDD $185 · WR 69% · n=62.
@@ -230,7 +237,9 @@ function buildEveLegScript(side: "long" | "short", filters: EntryFilters): strin
 
 const ema5 = ta.ema(i, 5, "c")
 if (position && position.side === "${side}" && ${emaCmp}) {
-  return { exit: true }
+  const oneR = ${emaTarget}
+  if (${already1R}) return { exit: true }
+  return { target: oneR }
 }
 
 // EVE_SESSION=20:30–23:59 America/Chicago. No Friday cutoff. Hours outside this window do not enter.
@@ -799,7 +808,7 @@ export function runLinkedStrategyScripts(
             const message = error instanceof Error ? error.message : "Script threw.";
             return { ok: false, error: `${leg.id}: Bar ${i + 1}: ${message}` };
           }
-          // Live-like: { exit: true } → leave at this close (causally valid; no OHLC look-ahead).
+          // { exit: true } → leave at this close (used when already ≥1R on EMA break). { target } → next-bar 1R.
           if (readExit(managed)) {
             pushExit(leg, pos, i, { price: bar.c, reason: "target" });
             leg.open = null;
@@ -824,7 +833,7 @@ export function runLinkedStrategyScripts(
             pushExit(leg, pos, i, exit);
             continue;
           }
-          // After fill, allow script manage on this close (EMA { exit: true } → leave @ close).
+          // After fill, allow script manage on this close (EMA ≥1R → exit@close; else schedule 1R).
           let managed: unknown;
           try {
             managed = leg.fn(bar, i, bars, leg.ta, {
