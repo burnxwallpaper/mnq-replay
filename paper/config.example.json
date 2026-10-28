@@ -9,7 +9,7 @@
   "currency": "USD",
   "filters": {
     "bodyRatio": 0.45,
-    "minBody": 2,
+    "minBody": 8,
     "volLen": 15,
     "volMult": 1.2
   },

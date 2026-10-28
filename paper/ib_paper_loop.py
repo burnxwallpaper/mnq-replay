@@ -152,7 +152,7 @@ Log = logging.getLogger("ib_paper_loop")
 @dataclass
 class Filters:
     bodyRatio: float = 0.45
-    minBody: float = 2.0
+    minBody: float = 8.0
     volLen: int = 15
     volMult: float = 1.2
 
@@ -192,7 +192,7 @@ def load_config() -> Config:
     fraw = raw.get("filters") or {}
     filters = Filters(
         bodyRatio=float(fraw.get("bodyRatio", 0.45)),
-        minBody=float(fraw.get("minBody", 2)),
+        minBody=float(fraw.get("minBody", 8)),
         volLen=int(fraw.get("volLen", 15)),
         volMult=float(fraw.get("volMult", 1.2)),
     )

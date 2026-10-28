@@ -10,6 +10,7 @@ import {
   paperFlipLockBars,
   resolveFlipLockBars,
 } from "./forward-state.ts";
+import { DEFAULT_ENTRY_FILTERS } from "../lib/strategy-script.ts";
 import { runPaperSides } from "./run-sides.ts";
 
 function chicagoUtc(year: number, month: number, day: number, hour: number, minute: number): number {
@@ -64,6 +65,15 @@ function signalIndexes(bars: OhlcvBar[], flipLockBars: number, side: "both" | "l
   }
   return out;
 }
+
+test("paper daytime filters default to the web minBody of 8", () => {
+  assert.deepEqual(defaultConfig().filters, DEFAULT_ENTRY_FILTERS);
+  assert.equal(defaultConfig().filters.minBody, 8);
+  assert.equal(defaultConfig().flipLockBars, 0);
+  const example = loadConfig(join("paper", "config.example.json"));
+  assert.equal(example.filters.minBody, 8);
+  assert.deepEqual(example.filters, DEFAULT_ENTRY_FILTERS);
+});
 
 test("paper both sides share the web flip lock; 0 and a single side do not", () => {
   assert.equal(paperFlipLockBars({ side: "both", flipLockBars: 15 }), 15);

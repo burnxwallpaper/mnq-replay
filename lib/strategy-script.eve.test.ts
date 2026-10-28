@@ -2,13 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { OhlcvBar } from "./strategies/types.ts";
 import {
+  DEFAULT_ENTRY_FILTERS,
+  DEFAULT_FLIP_LOCK_BARS,
   DEFAULT_STRATEGY_SCRIPT,
   DEFAULT_SHORT_STRATEGY_SCRIPT,
+  ENTRY_FILTERS_VERSION,
   EVE_LONG_STRATEGY_SCRIPT,
   EVE_SHORT_STRATEGY_SCRIPT,
+  PREVIOUS_DEFAULT_ENTRY_FILTERS,
   buildLongStrategyScript,
   buildShortStrategyScript,
   isStaleDefaultScript,
+  resolveStoredEntryFilters,
   runStrategyScript,
 } from "./strategy-script.ts";
 
@@ -61,6 +66,15 @@ function signalCount(source: string, bars: OhlcvBar[]): number {
 }
 
 test("daytime scripts stay the session default and are not treated as the eve preset", () => {
+  assert.equal(DEFAULT_ENTRY_FILTERS.minBody, 8);
+  assert.equal(DEFAULT_ENTRY_FILTERS.bodyRatio, 0.45);
+  assert.equal(DEFAULT_ENTRY_FILTERS.volLen, 15);
+  assert.equal(DEFAULT_ENTRY_FILTERS.volMult, 1.2);
+  assert.equal(DEFAULT_FLIP_LOCK_BARS, 0);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /body >= 8/);
+  assert.match(DEFAULT_SHORT_STRATEGY_SCRIPT, /body >= 8/);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /ta\.ema\(i, 5, "c"\)/);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /risk \* 2\.5/);
   assert.equal(DEFAULT_STRATEGY_SCRIPT.includes("PRESET=eve-2030-2359"), false);
   assert.equal(DEFAULT_SHORT_STRATEGY_SCRIPT.includes("PRESET=eve-2030-2359"), false);
   assert.match(DEFAULT_STRATEGY_SCRIPT, /stop: bar\.l/);
@@ -68,6 +82,7 @@ test("daytime scripts stay the session default and are not treated as the eve pr
   assert.match(DEFAULT_STRATEGY_SCRIPT, /FRIDAY_ENTRY_CUTOFF/);
   assert.match(DEFAULT_STRATEGY_SCRIPT, /ctMins >= 9 \* 60 && ctMins < 21 \* 60 - 30/);
   assert.equal(isStaleDefaultScript(DEFAULT_STRATEGY_SCRIPT), false);
+  assert.equal(isStaleDefaultScript(buildLongStrategyScript(PREVIOUS_DEFAULT_ENTRY_FILTERS)), true);
   assert.equal(isStaleDefaultScript(EVE_LONG_STRATEGY_SCRIPT), false);
   assert.match(EVE_LONG_STRATEGY_SCRIPT, /ctMins >= 1230 && ctMins <= 1439/);
   assert.match(EVE_LONG_STRATEGY_SCRIPT, /body \/ span >= 0\.7/);
@@ -79,6 +94,18 @@ test("daytime scripts stay the session default and are not treated as the eve pr
   assert.match(EVE_LONG_STRATEGY_SCRIPT, /risk: risk1/);
   assert.match(EVE_SHORT_STRATEGY_SCRIPT, /stop: bar\.c \+ risk1 \* 2/);
   assert.match(EVE_SHORT_STRATEGY_SCRIPT, /target: bar\.c - risk1 \* 2\.5/);
+});
+
+test("a saved copy of the old daytime minBody 2 default upgrades once", () => {
+  const upgraded = resolveStoredEntryFilters(PREVIOUS_DEFAULT_ENTRY_FILTERS, null);
+  assert.equal(upgraded.minBody, 8);
+  assert.deepEqual(upgraded, DEFAULT_ENTRY_FILTERS);
+
+  const explicit = resolveStoredEntryFilters(PREVIOUS_DEFAULT_ENTRY_FILTERS, String(ENTRY_FILTERS_VERSION));
+  assert.equal(explicit.minBody, 2);
+
+  const custom = resolveStoredEntryFilters({ ...PREVIOUS_DEFAULT_ENTRY_FILTERS, minBody: 10 }, null);
+  assert.equal(custom.minBody, 10);
 });
 
 test("eve entries only fire from 20:30 through 23:59 Chicago", () => {
