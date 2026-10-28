@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type PointerEvent } from "react";
-import { equityAt, equityAxisTicks } from "@/lib/equity-axis";
+import { equityAt, equityAxisTicks, equityYLabels, equityYOf } from "@/lib/equity-axis";
 import { formatFixtureTime } from "@/lib/fixture-bars";
 import type {
   BacktestStats,
@@ -127,8 +127,9 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
   const span = t1 - t0;
   const xOf = (ts: number) =>
     span <= 0 ? padX : padX + ((ts - t0) / span) * (width - padX * 2);
-  const yOf = (value: number) =>
-    padY + (1 - (value - min) / (max - min)) * (plotBottom - padY * 2);
+  // Keep labels on the same horizontal as plotted extremes (see equityYOf).
+  const yOf = (value: number) => equityYOf(value, min, max, padY, plotBottom);
+  const yLabels = equityYLabels(min, max, padY, plotBottom);
   const baselineY = yOf(STARTING_NET_ASSET);
   const primary = series.find((item) => item.id === "combined") ?? series[0];
   const areaLine = primary ? linePath(primary.equity, xOf, yOf) : "";
@@ -219,18 +220,19 @@ function EquityGraph({ series }: { series: EquitySeries[] }) {
             strokeDasharray="2 2"
           />
         ) : null}
-        <text x={padX} y={12} fill="#9aa8b8" fontSize={11} fontFamily="ui-monospace, monospace">
-          {formatAsset(max)}
-        </text>
-        <text
-          x={padX}
-          y={plotBottom - 4}
-          fill="#9aa8b8"
-          fontSize={11}
-          fontFamily="ui-monospace, monospace"
-        >
-          {formatAsset(min)}
-        </text>
+        {yLabels.map((label) => (
+          <text
+            key={`y-${label.value}`}
+            x={padX}
+            y={label.y}
+            dominantBaseline="middle"
+            fill="#9aa8b8"
+            fontSize={11}
+            fontFamily="ui-monospace, monospace"
+          >
+            {formatAsset(label.value)}
+          </text>
+        ))}
       </svg>
       <div className="pointer-events-none absolute inset-x-0 bottom-0.5">
         {ticks.map((tick) => {
