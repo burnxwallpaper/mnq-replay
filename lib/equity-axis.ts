@@ -151,3 +151,47 @@ export function equityAt(points: readonly EquityPoint[], ts: number): number | n
   }
   return value;
 }
+
+/** Map an equity dollar value onto the SVG Y axis (max at padY, min at plotBottom - padY). */
+export function equityYOf(
+  value: number,
+  min: number,
+  max: number,
+  padY: number,
+  plotBottom: number,
+): number {
+  const span = max - min;
+  if (!(span > 0) || !Number.isFinite(value)) {
+    return padY + (plotBottom - padY * 2) / 2;
+  }
+  return padY + (1 - (value - min) / span) * (plotBottom - padY * 2);
+}
+
+export type EquityYLabel = {
+  value: number;
+  /** SVG y for `dominant-baseline="middle"` so the glyph sits on the plotted extreme. */
+  y: number;
+};
+
+/**
+ * Dollar labels for the equity chart Y axis.
+ * Always includes max (top) and min (bottom) at the same Y as the plotted curves.
+ * Adds one midpoint when it sits far enough from both extremes to stay readable.
+ */
+export function equityYLabels(
+  min: number,
+  max: number,
+  padY: number,
+  plotBottom: number,
+): EquityYLabel[] {
+  const yOf = (value: number) => equityYOf(value, min, max, padY, plotBottom);
+  const labels: EquityYLabel[] = [{ value: max, y: yOf(max) }];
+  const mid = (min + max) / 2;
+  const midY = yOf(mid);
+  const minGap = 18;
+  if (Math.abs(midY - yOf(max)) >= minGap && Math.abs(midY - yOf(min)) >= minGap) {
+    labels.push({ value: mid, y: midY });
+  }
+  labels.push({ value: min, y: yOf(min) });
+  return labels;
+}

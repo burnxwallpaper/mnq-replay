@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { equityAt, equityAxisTicks } from "./equity-axis.ts";
+import { equityAt, equityAxisTicks, equityYLabels, equityYOf } from "./equity-axis.ts";
 
 const INNER = 628;
 
@@ -68,4 +68,28 @@ test("equityAt holds the previous value until the next point", () => {
   assert.equal(equityAt(points, 5_000), 12);
   assert.equal(equityAt(points, 10_000), 8);
   assert.equal(equityAt([], 1), null);
+});
+
+test("equityYOf puts max at padY and min at plotBottom - padY", () => {
+  const padY = 10;
+  const plotBottom = 148;
+  assert.equal(equityYOf(100, 0, 100, padY, plotBottom), padY);
+  assert.equal(equityYOf(0, 0, 100, padY, plotBottom), plotBottom - padY);
+  assert.equal(equityYOf(50, 0, 100, padY, plotBottom), padY + (plotBottom - padY * 2) / 2);
+});
+
+test("equityYLabels sit on the same Y as plotted min and max", () => {
+  const padY = 10;
+  const plotBottom = 148;
+  const min = 9_828.52;
+  const max = 42_692.81;
+  const labels = equityYLabels(min, max, padY, plotBottom);
+  assert.equal(labels[0]?.value, max);
+  assert.equal(labels[0]?.y, equityYOf(max, min, max, padY, plotBottom));
+  assert.equal(labels[labels.length - 1]?.value, min);
+  assert.equal(labels[labels.length - 1]?.y, equityYOf(min, min, max, padY, plotBottom));
+  assert.equal(labels[0]?.y, padY);
+  assert.equal(labels[labels.length - 1]?.y, plotBottom - padY);
+  assert.ok(labels.length >= 2);
+  assert.ok(labels.length <= 3);
 });
