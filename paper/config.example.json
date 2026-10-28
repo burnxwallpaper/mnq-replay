@@ -1,5 +1,6 @@
 {
   "mode": "ib-paper",
+  "strategy": "stacked-ema-hybrid",
   "ibHost": "127.0.0.1",
   "ibPort": 4002,
   "clientId": 17,
@@ -8,10 +9,10 @@
   "exchange": "CME",
   "currency": "USD",
   "filters": {
-    "bodyRatio": 0.45,
-    "minBody": 2,
-    "volLen": 15,
-    "volMult": 1.2
+    "bodyRatio": 0,
+    "minBody": 0,
+    "volLen": 10,
+    "volMult": 1.8
   },
   "roundTripFeeUsd": 1.6,
   "pointValue": 2,
@@ -21,7 +22,13 @@
   "placeOrders": false,
   "warmupBars": 400,
   "limitOffsetTicks": 0,
-  "rewardMultiple": 2.5,
+  "emaFast": 20,
+  "emaMid": 50,
+  "emaSlow": 100,
+  "lookbackHigh": 50,
+  "rewardMultiple": 3.5,
+  "hybridDownHalfAsR": 2,
+  "hybridUpHalfAsR": 2,
   "entryLimitExpiryBars": 2,
   "flipLockBars": 0
 }

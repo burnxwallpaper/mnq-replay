@@ -70,16 +70,16 @@ function formatPnl(value: number) {
 function readEnabledRunners(): { long: boolean; short: boolean } {
   try {
     const raw = window.localStorage.getItem(RUNNERS_STORAGE_KEY);
-    if (!raw) return { long: true, short: false };
+    if (!raw) return { long: true, short: true };
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return { long: true, short: false };
+    if (typeof parsed !== "object" || parsed === null) return { long: true, short: true };
     const record = parsed as Record<string, unknown>;
     return {
       long: record.long !== false,
       short: record.short === true,
     };
   } catch {
-    return { long: true, short: false };
+    return { long: true, short: true };
   }
 }
 
@@ -201,7 +201,7 @@ export function ReplayWorkspace() {
   const [longSource, setLongSource] = useState<string | null>(null);
   const [longRun, setLongRun] = useState<ScriptRun | null>(null);
   const [longEnabled, setLongEnabled] = useState(true);
-  const [shortEnabled, setShortEnabled] = useState(false);
+  const [shortEnabled, setShortEnabled] = useState(true);
   const [fitRevision, setFitRevision] = useState(0);
   const [entryFilters, setEntryFilters] = useState<EntryFilters>(DEFAULT_ENTRY_FILTERS);
   const [roundTripFeeUsd, setRoundTripFeeUsd] = useState(DEFAULT_ROUND_TRIP_FEE_USD);
@@ -382,10 +382,10 @@ export function ReplayWorkspace() {
       setEntryFilters(EVE_ENTRY_FILTERS);
       return;
     }
-    const saved = readEnabledRunners();
-    setLongEnabled(saved.long);
-    setShortEnabled(saved.short);
-    setEntryFilters(readEntryFilters());
+    // Daytime stacked-EMA hybrid: both sides on, Paper-matching filters.
+    setLongEnabled(true);
+    setShortEnabled(true);
+    setEntryFilters(DEFAULT_ENTRY_FILTERS);
     setFlipLockBars(readFlipLockBars());
   }
 
@@ -647,7 +647,7 @@ export function ReplayWorkspace() {
         <p id="strategy-runners-help" className="text-xs text-muted-foreground">
           {presetId === "eve"
             ? "Eve candidate: CT 20:30–23:59 only, vstrict 0.7/6/20×2.2, stop 2× risk1, target and EMA→1R still use risk1. Combined long+short. Daytime stays the default when you switch back."
-            : `Daytime default: CT 09:00–20:29, Fri no new entries from 14:45, filters 0.45/2/15×1.2, stop at the bar extreme, flip lock ${flipLockBars} (0 = off; above 0 blocks a new opposite-side entry for that many 1m bars after a full stop, Save to apply). Long and Short share that lock when both are checked.`}
+            : `Daytime stacked-EMA hybrid (Paper): CT 09:00–20:29, Fri no new from 14:45, EMA20/50/100 + vol SMA(${entryFilters.volLen})×${entryFilters.volMult}, 3.5R to 50H/50L (down-long / up-short halfDist as 2R), no EMA5 tighten, session-end flatten, flip lock ${flipLockBars} (0 = off). Long+Short share one position and that lock.`}
         </p>
         {presetId === "eve" ? (
           <p id="strategy-preset-note" className="text-xs text-muted-foreground">
@@ -703,7 +703,7 @@ export function ReplayWorkspace() {
             <span className="text-[oklch(0.78_0.15_155)]">Long</span>
             <span className="text-[#7aa2ff]">Short</span>
             <span>Exit</span>
-            <span className="text-[#39d0ff]">EMA 5</span>
+            <span className="text-[#39d0ff]">EMA (chart)</span>
           </div>
           <div className="absolute top-2 right-2 z-10">
             <button

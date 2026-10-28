@@ -125,24 +125,36 @@ class TimestampLockTest(unittest.TestCase):
 
 class ReplayAndDryRunTest(unittest.TestCase):
     def _series(self) -> list[loop.Bar]:
+        """Rising trend so EMA20>50>100, then long signal / stop / re-entry bars."""
         start = int(datetime(2026, 10, 26, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
-        bars = [_bar(start + i * 60_000, 100, 100.25, 99.75, 100, 10) for i in range(40)]
-        bars[20] = _bar(bars[20].ts, 100, 110, 100, 110, 5000)
-        bars[21] = _bar(bars[21].ts, 110, 110.25, 99, 105, 10)
-        bars[22] = _bar(bars[22].ts, 110, 110, 100, 100, 5000)
-        bars[25] = _bar(bars[25].ts, 100, 112, 100, 112, 5000)
+        bars = []
+        for i in range(130):
+            base = 100.0 + i * 0.5
+            bars.append(_bar(start + i * 60_000, base, base + 0.25, base - 0.25, base, 10))
+        # Signal long at 110: up bar, vol spike, room to H50
+        i = 110
+        entry = bars[i - 1].c + 0.5
+        bars[i] = _bar(bars[i].ts, entry - 1.0, entry + 7.0, entry - 1.5, entry, 5000)
+        # Fill then stop on next bar (low through SL ≈ entry - (H-entry)/3.5)
+        bars[i + 1] = _bar(bars[i + 1].ts, entry, entry + 0.25, entry - 20.0, entry - 5.0, 10)
+        # Opposite-side candidate bar (would be short in impulse; lock blocks)
+        bars[i + 2] = _bar(bars[i + 2].ts, entry - 5.0, entry - 4.0, entry - 12.0, entry - 10.0, 5000)
+        # Same-side re-entry later
+        j = 125
+        e2 = bars[j - 1].c + 0.5
+        bars[j] = _bar(bars[j].ts, e2 - 1.0, e2 + 7.0, e2 - 1.5, e2, 5000)
         return bars
 
     def test_replay_arms_one_shared_lock_and_blocks_the_opposite_side(self) -> None:
         bars = self._series()
-        locks = loop.replay_flip_locks(bars, loop.Filters(), "both", 15, 2.5, 2)
-        self.assertTrue(any(lock.stop_side == "long" and lock.exit_ts == bars[21].ts for lock in locks))
-        self.assertIsNotNone(flip_lock.signal_flip_locked(locks, bars, "short", 22, 15))
-        self.assertIsNone(flip_lock.signal_flip_locked(locks, bars, "short", 21, 15))
-        self.assertIsNone(flip_lock.signal_flip_locked(locks, bars, "long", 25, 15))
-        self.assertIsNone(flip_lock.signal_flip_locked(locks, bars, "short", 21 + 16, 15))
-        self.assertEqual(loop.replay_flip_locks(bars, loop.Filters(), "both", 0, 2.5, 2), [])
-        self.assertEqual(loop.replay_flip_locks(bars, loop.Filters(), "long", 15, 2.5, 2), [])
+        locks = loop.replay_flip_locks(bars, loop.Filters(), "both", 15, 3.5, 2)
+        self.assertTrue(any(lock.stop_side == "long" and lock.exit_ts == bars[111].ts for lock in locks))
+        self.assertIsNotNone(flip_lock.signal_flip_locked(locks, bars, "short", 112, 15))
+        self.assertIsNone(flip_lock.signal_flip_locked(locks, bars, "short", 111, 15))
+        self.assertIsNone(flip_lock.signal_flip_locked(locks, bars, "long", 125, 15))
+        self.assertIsNone(flip_lock.signal_flip_locked(locks, bars, "short", 111 + 16, 15))
+        self.assertEqual(loop.replay_flip_locks(bars, loop.Filters(), "both", 0, 3.5, 2), [])
+        self.assertEqual(loop.replay_flip_locks(bars, loop.Filters(), "long", 15, 3.5, 2), [])
 
     def test_dry_run_stop_blocks_opposite_and_allows_same_side(self) -> None:
         bars = self._series()
@@ -153,13 +165,13 @@ class ReplayAndDryRunTest(unittest.TestCase):
             loop.TRADES_PATH = Path(tmp) / "trades.jsonl"
             try:
                 runner = loop.PaperLoop(loop.Config(side="both", flipLockBars=15), place_orders=False, dry_run=True)
-                for index in range(20, 26):
+                for index in range(110, 126):
                     # Live buffers only include the forming bar after `index`, not later history.
                     runner.bars = bars[: index + 2]
                     runner._heartbeat_eval(index, source="test", allow_order=True)
                 self.assertTrue(runner.state.flip_locks)
                 self.assertIsNotNone(
-                    flip_lock.signal_flip_locked(runner.state.flip_locks, bars, "short", 22, 15)
+                    flip_lock.signal_flip_locked(runner.state.flip_locks, bars, "short", 112, 15)
                 )
                 self.assertIsNotNone(runner.state.open)
                 assert runner.state.open is not None
@@ -348,9 +360,7 @@ class PaperOrderFillLagTest(unittest.TestCase):
         stop_text = "\n".join(stop_logs.output)
         self.assertIn("CLOSED stop", stop_text)
         self.assertIn("FLIP-LOCK armed", stop_text)
-        self.assertIn("SIGNAL short", stop_text)
-        self.assertIn("flip_lock=True", stop_text)
-        self.assertIn("FLIP-LOCK block short", stop_text)
+        # Stacked-EMA hybrid needs EMA100 ready; this short series has no opposite signal.
         self.assertNotIn("clearing local open state", stop_text)
         self.assertIsNone(self.runner.state.open)
         self.assertEqual(self.gateway.placed, [])

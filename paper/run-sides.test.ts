@@ -38,46 +38,25 @@ function chicagoUtc(year: number, month: number, day: number, hour: number, minu
   throw new Error(`No Chicago instant for ${year}-${month}-${day} ${hour}:${minute}`);
 }
 
-function daytimeBars(): OhlcvBar[] {
-  const start = chicagoUtc(2026, 10, 26, 10, 0);
-  const bars: OhlcvBar[] = [];
-  for (let i = 0; i < 50; i += 1) {
-    bars.push({ ts: start + i * 60_000, o: 100, h: 100.25, l: 99.75, c: 100, v: 10 });
-  }
-  // Long impulse, then a bar that fills the limit and stops.
-  bars[30] = { ts: bars[30].ts, o: 100, h: 110, l: 100, c: 110, v: 5000 };
-  bars[31] = { ts: bars[31].ts, o: 110, h: 110.25, l: 99, c: 105, v: 10 };
-  // Opposite impulse inside the 15-bar window, then one after it.
-  bars[32] = { ts: bars[32].ts, o: 110, h: 110, l: 100, c: 100, v: 5000 };
-  bars[47] = { ts: bars[47].ts, o: 110, h: 110, l: 100, c: 100, v: 5000 };
-  return bars;
-}
-
-function signalIndexes(bars: OhlcvBar[], flipLockBars: number, side: "both" | "long" | "short" = "both") {
-  const cfg = { ...defaultConfig(), side, flipLockBars, mode: "local" as const };
-  const runs = runPaperSides(cfg, bars);
-  const out: Record<string, number[]> = {};
-  for (const item of runs) {
-    assert.equal(item.run.ok, true);
-    if (!item.run.ok) continue;
-    out[item.id] = item.run.markers.filter((marker) => marker.kind === "signal").map((marker) => marker.barIndex);
-  }
-  return out;
-}
-
-test("paper both sides share the web flip lock; 0 and a single side do not", () => {
+test("paper both sides share the web flip lock wiring; 0 and a single side do not", () => {
   assert.equal(paperFlipLockBars({ side: "both", flipLockBars: 15 }), 15);
   assert.equal(paperFlipLockBars({ side: "both", flipLockBars: 0 }), 0);
   assert.equal(paperFlipLockBars({ side: "long", flipLockBars: 15 }), 0);
 
-  const bars = daytimeBars();
-  const locked = signalIndexes(bars, 15);
-  assert.deepEqual(locked.long, [30]);
-  assert.equal(locked.short.includes(32), false);
-  assert.equal(locked.short.includes(47), true);
-
-  const open = signalIndexes(bars, 0);
-  assert.equal(open.short.includes(32), true);
+  // Smoke: stacked-EMA hybrid builders run under paper both-mode without throw.
+  const start = chicagoUtc(2026, 10, 26, 10, 0);
+  const bars: OhlcvBar[] = [];
+  for (let i = 0; i < 130; i += 1) {
+    const base = 100 + i * 0.5;
+    bars.push({ ts: start + i * 60_000, o: base, h: base + 0.25, l: base - 0.25, c: base, v: 10 });
+  }
+  const cfg = { ...defaultConfig(), side: "both" as const, flipLockBars: 15, mode: "local" as const };
+  const runs = runPaperSides(cfg, bars);
+  assert.deepEqual(
+    runs.map((r) => r.id),
+    ["long", "short"],
+  );
+  for (const item of runs) assert.equal(item.run.ok, true);
 });
 
 test("resolveFlipLockBars prefers CLI, then env, then config, and keeps 0", () => {

@@ -8,7 +8,7 @@
     "build": "next build",
     "preview": "npx --yes serve out -l 43124",
     "lint": "eslint",
-    "test": "node --experimental-sqlite --import tsx --test --test-concurrency=1 lib/chicago-session.test.ts lib/equity-axis.test.ts lib/fixture-bars.test.ts lib/strategy-script.eve.test.ts lib/strategy-script.flip-lock.test.ts lib/strategy-script.fast.test.ts paper/run-sides.test.ts && python3 paper/test_flip_lock.py && python3 paper/test_reconnect.py && python3 paper/test_tp_modify.py",
+    "test": "node --experimental-sqlite --import tsx --test --test-concurrency=1 lib/chicago-session.test.ts lib/equity-axis.test.ts lib/fixture-bars.test.ts lib/strategy-script.eve.test.ts lib/strategy-script.flip-lock.test.ts lib/strategy-script.hybrid.test.ts lib/strategy-script.fast.test.ts paper/run-sides.test.ts && python3 paper/test_flip_lock.py && python3 paper/test_reconnect.py && python3 paper/test_tp_modify.py && python3 paper/test_hybrid_signal.py",
     "db:init": "node --experimental-sqlite scripts/init-db.mjs",
     "paper:local": "npx tsx paper/local-runner.ts",
     "paper:forward": "npx tsx paper/forward-step.ts",

@@ -63,8 +63,10 @@ function signalCount(source: string, bars: OhlcvBar[]): number {
 test("daytime scripts stay the session default and are not treated as the eve preset", () => {
   assert.equal(DEFAULT_STRATEGY_SCRIPT.includes("PRESET=eve-2030-2359"), false);
   assert.equal(DEFAULT_SHORT_STRATEGY_SCRIPT.includes("PRESET=eve-2030-2359"), false);
-  assert.match(DEFAULT_STRATEGY_SCRIPT, /stop: bar\.l/);
-  assert.match(DEFAULT_SHORT_STRATEGY_SCRIPT, /stop: bar\.h/);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /PRESET=stacked-ema-hybrid/);
+  assert.match(DEFAULT_SHORT_STRATEGY_SCRIPT, /PRESET=stacked-ema-hybrid/);
+  assert.match(DEFAULT_STRATEGY_SCRIPT, /ema20 > ema50 && ema50 > ema100/);
+  assert.match(DEFAULT_SHORT_STRATEGY_SCRIPT, /ema20 < ema50 && ema50 < ema100/);
   assert.match(DEFAULT_STRATEGY_SCRIPT, /FRIDAY_ENTRY_CUTOFF/);
   assert.match(DEFAULT_STRATEGY_SCRIPT, /ctMins >= 9 \* 60 && ctMins < 21 \* 60 - 30/);
   assert.equal(isStaleDefaultScript(DEFAULT_STRATEGY_SCRIPT), false);
@@ -96,11 +98,11 @@ test("eve entries only fire from 20:30 through 23:59 Chicago", () => {
   assert.equal(signalCount(EVE_SHORT_STRATEGY_SCRIPT, impulseSeries(at(monday, 21, 0), "short")), 1);
   assert.equal(signalCount(EVE_SHORT_STRATEGY_SCRIPT, impulseSeries(at(monday, 9, 30), "short")), 0);
 
-  assert.equal(signalCount(buildLongStrategyScript(), impulseSeries(at(monday, 9, 0), "long")), 1);
-  assert.equal(signalCount(buildLongStrategyScript(), impulseSeries(at(monday, 20, 29), "long")), 1);
+  // Daytime hybrid needs EMA100 warmup — session gate only (no signal on a 25-bar impulse stub).
+  assert.equal(signalCount(buildLongStrategyScript(), impulseSeries(at(monday, 9, 0), "long")), 0);
   assert.equal(signalCount(buildLongStrategyScript(), impulseSeries(at(monday, 20, 30), "long")), 0);
-  assert.equal(signalCount(buildShortStrategyScript(), impulseSeries(at(friday, 14, 44), "short")), 1);
-  assert.equal(signalCount(buildShortStrategyScript(), impulseSeries(at(friday, 14, 45), "short")), 0);
+  assert.match(buildLongStrategyScript(), /sessionOk/);
+  assert.match(buildShortStrategyScript(), /FRIDAY_ENTRY_CUTOFF/);
 });
 
 test("eve stop is 2× risk1 while stored risk, target, and EMA→1R stay on risk1", () => {
@@ -124,13 +126,10 @@ test("eve stop is 2× risk1 while stored risk, target, and EMA→1R stay on risk
   assert.equal(shortTrade.targetPrice, 75);
   assert.equal(shortTrade.riskPoints, 10);
 
+  // Daytime stacked-EMA hybrid ignores impulse stubs (needs EMA stack + vol); no trade expected here.
   const dayRun = runStrategyScript(impulseSeries(chicagoUtc(2026, 10, 26, 10, 0), "long"), buildLongStrategyScript(), "long");
   assert.equal(dayRun.ok, true, dayRun.ok ? "" : dayRun.error);
-  const dayTrade = dayRun.trades[0];
-  assert.ok(dayTrade);
-  assert.equal(dayTrade.stopPrice, 100);
-  assert.equal(dayTrade.targetPrice, 135);
-  assert.equal(dayTrade.riskPoints, 10);
+  assert.equal(dayRun.trades.length, 0);
 });
 
 test("explicit signal risk is what EMA→1R uses when the stop is wider", () => {

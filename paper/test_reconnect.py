@@ -384,9 +384,9 @@ class ReconnectTest(unittest.TestCase):
             any(lock.exit_ts == self.start and lock.stop_side == "long" for lock in runner.state.flip_locks)
         )
         decided = len(runner.bars) - 2
-        again = loop.evaluate_bar(runner.bars, decided, runner.cfg.filters, "both", None, 2.5)
-        self.assertIsNotNone(again.signal)
-        self.assertEqual(again.signal.side, "long")  # type: ignore[union-attr]
+        # Short warmup buffer cannot satisfy EMA100 ready; hybrid yields no signal here.
+        again = loop.evaluate_bar(runner.bars, decided, runner.cfg.filters, "both", None, 3.5)
+        self.assertIsNone(again.signal)
         self.assertEqual(runner._last_processed_ts, self.start + 120_000)
 
     def test_sigterm_during_reconnect_stops(self) -> None:

@@ -1,4 +1,4 @@
-# Paper / 模擬倉（MNQ impulse）
+# Paper / 模擬倉（MNQ stacked-EMA hybrid）
 
 用 Interactive Brokers（香港）**Paper Trading**，或本機 bar 檔，先運作一段時間驗證策略，再考慮實盤。
 
@@ -76,17 +76,20 @@ py -3 paper\ib_paper_loop.py --dry-run --port 4002
 3. **緊急**：喺 TWS／Gateway 將帳戶設 **Read-Only API**，或登出 Gateway  
 4. **程式安全**：預設拒絕 Live 埠 **4001／7496**（除非 `allowLive: true`）
 
-### 策略對齊（同網頁 Daytime 預設）
+### 策略對齊（stacked-EMA hybrid champion）
 
-網頁 Preset 入面嘅 **Eve 20:30–23:59 · stop2 asym · 2.5R+EMA** 只係 replay 候選，唔會改呢度。Paper／IB 循環保持下面嘅日盤預設。
+對齊 `strat-rd-stacked-ema-long/engine.mjs` 嘅 long+short hybrid（`side=both`）。
 
-- Filters：`0.45 / 2 / 15 / 1.2`  
-- Session：`America/Chicago` **09:00–20:29** 先開新倉（session close 21:00；收市前 30 分鐘唔再開新倉）；**星期五 CT 14:45 起唔再開新倉**；已開倉照常管理／平倉  
-- Long 陽燭 impulse／Short 陰燭 impulse；目標 **2.5R**；收市穿 5 EMA 收窄到 **1R**（改 TP）  
-- 入場：**Limit@訊號收市**；訊號後 **2 根完結 1m bar** 仍未成交 → 取消 parent（未啟動嘅 TP／SL 一齊撤）；成交後止蝕／止賺 GTC 照留  
-- 會計用來回費 **$1.6**（只記帳；IB Paper 另有模擬費用）  
-- 合約：**MNQ · CME** front month（唔係 GLOBEX）
-- **Flip lock（預設 0，同網頁）**：預設關閉。設成 N（例如 15）之後，完整止蝕（stop）會封鎖對面新倉接下來 N 根完成嘅 1m bar（訊號 bar 喺 E+1 … E+N）；同方向仍可開；止賺唔鎖；止蝕嗰根 bar 上面嘅訊號仍可開。`0` 關閉。`side=both`（預設）先啟用，long／short 共用 `state.json` 入面同一組 `flip_locks`。單邊 `side=long` 或 `short` 唔鎖，同網頁只開一邊一樣。覆寫：`--flip-lock-bars`、環境變數 `FLIP_LOCK_BARS`、或 `config.json` 嘅 `flipLockBars`（CLI > env > config）。Warmup 會用同一套單倉規則重建鎖；Ctrl+C 之後鎖會留喺 `state.json`。
+- Strategy：`stacked-ema-hybrid` — EMA20/50/100 stack；**無** bodyRatio／minBody／impulse candle filter  
+- Volume：`volLen=10`（含當根）× `volMult=1.8`（`bar.v >= avg * 1.8`）  
+- Long：EMA20>50>100；Short：EMA20<50<100  
+- R sizing：`rewardMultiple=3.5` 去 50-bar high/low（含訊號 bar）；long 陰燭 `hybridDownHalfAsR=2`（halfDist=(H50−C)/2）；short 陽燭 `hybridUpHalfAsR=2`（halfDist=(C−L50)/2）  
+- **無** EMA(5) adverse → 1R tighten／market flatten；入場後靠 bracket TP/SL  
+- Session：`America/Chicago` **09:00–20:29** 先開新倉；**星期五 CT 14:45 起唔再開新倉**；已開倉照常管理／平倉  
+- 入場：**Limit@訊號收市**；訊號後 **2 根完結 1m bar** 仍未成交 → 取消；成交前觸及 SL → 取消 pending  
+- 會計用來回費 **$1.6**；MNQ **$2/pt**；`maxContracts=1`  
+- 合約：**MNQ · CME** front month  
+- **Flip lock（預設 0）**：同前；CLI / `FLIP_LOCK_BARS` / `config.json` 覆寫。
 
 
 ### 常見阻礙
