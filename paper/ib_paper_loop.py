@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-IBKR Paper Trading loop for MNQ 1-minute impulse strategy.
+IBKR Paper Trading loop for MNQ 1-minute stacked-EMA hybrid (long+short).
 
 Architecture:
   - Persistent IB Gateway / TWS connection (Paper socket, default 4002)
-  - One-time historical warmup (1m bars) for SMA / EMA / volume
+  - One-time historical warmup (1m bars) for EMA20/50/100 + volume SMA
   - Live 1m stream via reqHistoricalData(..., keepUpToDate=True)
     (reqRealTimeBars is 5-second only; keepUpToDate is the 1m path for MNQ)
-  - On each *completed* bar: rolling indicators → signal / EMA exit → orders
-  - EMA adverse close → market flatten at (approx) that close (matches web exit@close;
-    no same-bar OHLC 1R look-ahead). Far TP + stop still work until then.
+  - On each *completed* bar: stacked-EMA + vol spike → hybrid R sizing → orders
+  - Long: EMA20>50>100; Short: EMA20<50<100; volLen=10 × volMult=1.8 (incl current)
+  - Hybrid R: rewardMultiple=3.5 to 50H/50L on with-trend/doji; down-long / up-short
+    halfDist from lookback extreme treated as hybridDownHalfAsR / hybridUpHalfAsR (2)
+  - Bracket TP/SL fixed at entry (no EMA(5) adverse tighten / market flatten)
   - Never re-downloads full history every minute
 
 Safety:
@@ -20,8 +22,6 @@ Safety:
   - A working Paper entry stays tracked until the parent fills, the parent is cancelled,
     or that limit expires. An empty positions() snapshot is not a cancel (fills lag it).
   - maxContracts defaults to 1
-  - EMA exit cancels the working bracket and submits a market flatten (Paper).
-    Dry-run books the exit at the completed bar's close.
   - Daytime flip lock (default 0, off): set above 0 to block opposite-side
     entries for that many completed 1m bars after a full stop. Same side stays
     allowed. Shared by long and short when side=both. Paper sockets only.
@@ -151,15 +151,17 @@ Log = logging.getLogger("ib_paper_loop")
 
 @dataclass
 class Filters:
-    bodyRatio: float = 0.45
-    minBody: float = 2.0
-    volLen: int = 15
-    volMult: float = 1.2
+    """Volume spike only for stacked-EMA hybrid. bodyRatio/minBody kept for old configs (ignored)."""
+    bodyRatio: float = 0.0  # unused (stacked-EMA hybrid has no body filter)
+    minBody: float = 0.0  # unused
+    volLen: int = 10
+    volMult: float = 1.8
 
 
 @dataclass
 class Config:
     mode: str = "ib-paper"
+    strategy: str = "stacked-ema-hybrid"
     ibHost: str = "127.0.0.1"
     ibPort: int = 4002
     clientId: int = 17
@@ -176,7 +178,14 @@ class Config:
     placeOrders: bool = False
     warmupBars: int = 400
     limitOffsetTicks: float = 0.0  # 0 = limit at bar close; MNQ tick=0.25
-    rewardMultiple: float = 2.5  # initial TP in R; EMA may tighten to 1R
+    # Stacked-EMA hybrid (matches strat-rd-stacked-ema-long/engine.mjs champion)
+    emaFast: int = 20
+    emaMid: int = 50
+    emaSlow: int = 100
+    lookbackHigh: int = 50  # also lookback low for shorts
+    rewardMultiple: float = 3.5  # with-trend / doji R to 50H/50L
+    hybridDownHalfAsR: float = 2.0  # long down bars: halfDist=(H-C)/2 as this many R
+    hybridUpHalfAsR: float = 2.0  # short up bars: halfDist=(C-L)/2 as this many R
     entryLimitExpiryBars: int = 2  # cancel unfilled entry after N completed 1m bars
     # Opposite-side lock after a full stop. 0 matches the web daytime default (off).
     flipLockBars: int = DEFAULT_FLIP_LOCK_BARS
@@ -191,13 +200,14 @@ def load_config() -> Config:
             break
     fraw = raw.get("filters") or {}
     filters = Filters(
-        bodyRatio=float(fraw.get("bodyRatio", 0.45)),
-        minBody=float(fraw.get("minBody", 2)),
-        volLen=int(fraw.get("volLen", 15)),
-        volMult=float(fraw.get("volMult", 1.2)),
+        bodyRatio=float(fraw.get("bodyRatio", 0.0)),
+        minBody=float(fraw.get("minBody", 0.0)),
+        volLen=int(fraw.get("volLen", 10)),
+        volMult=float(fraw.get("volMult", 1.8)),
     )
     return Config(
         mode=str(raw.get("mode", "ib-paper")),
+        strategy=str(raw.get("strategy", "stacked-ema-hybrid")),
         ibHost=str(raw.get("ibHost", "127.0.0.1")),
         ibPort=int(raw.get("ibPort", 4002)),
         clientId=int(raw.get("clientId", 17)),
@@ -214,7 +224,13 @@ def load_config() -> Config:
         placeOrders=bool(raw.get("placeOrders", False)),
         warmupBars=max(50, int(raw.get("warmupBars", 400))),
         limitOffsetTicks=float(raw.get("limitOffsetTicks", 0)),
-        rewardMultiple=float(raw.get("rewardMultiple", 2.5)),
+        emaFast=max(1, int(raw.get("emaFast", 20))),
+        emaMid=max(1, int(raw.get("emaMid", 50))),
+        emaSlow=max(1, int(raw.get("emaSlow", 100))),
+        lookbackHigh=max(1, int(raw.get("lookbackHigh", raw.get("lookbackLow", 50)))),
+        rewardMultiple=float(raw.get("rewardMultiple", 3.5)),
+        hybridDownHalfAsR=float(raw.get("hybridDownHalfAsR", 2.0)),
+        hybridUpHalfAsR=float(raw.get("hybridUpHalfAsR", 2.0)),
         entryLimitExpiryBars=max(1, int(raw.get("entryLimitExpiryBars", ENTRY_LIMIT_EXPIRY_BARS))),
         flipLockBars=normalize_flip_lock_bars(raw["flipLockBars"])
         if "flipLockBars" in raw
@@ -412,8 +428,10 @@ def session_ok(ts_ms: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Strategy (mirror buildLong / buildShort)
+# Strategy (stacked-EMA hybrid — match strat-rd-stacked-ema-long/engine.mjs)
 # ---------------------------------------------------------------------------
+
+TICK = 0.25  # MNQ
 
 
 @dataclass
@@ -428,8 +446,28 @@ class Signal:
 @dataclass
 class EvalResult:
     signal: Optional[Signal] = None
-    tighten_target: Optional[float] = None  # legacy 1R (unused when ema_exit_close)
-    ema_exit_close: bool = False  # EMA adverse at close → flatten now
+    # Legacy fields kept so older tests / TP-modify plumbing can inject them.
+    # Stacked-EMA hybrid never sets these (no EMA5 adverse exit).
+    tighten_target: Optional[float] = None
+    ema_exit_close: bool = False
+
+
+def lookback_high_inclusive(bars: list[Bar], index: int, n: int) -> float:
+    start = max(0, index - n + 1)
+    hi = -float("inf")
+    for j in range(start, index + 1):
+        if bars[j].h > hi:
+            hi = bars[j].h
+    return hi
+
+
+def lookback_low_inclusive(bars: list[Bar], index: int, n: int) -> float:
+    start = max(0, index - n + 1)
+    lo = float("inf")
+    for j in range(start, index + 1):
+        if bars[j].l < lo:
+            lo = bars[j].l
+    return lo
 
 
 def evaluate_bar(
@@ -438,64 +476,104 @@ def evaluate_bar(
     filters: Filters,
     side_mode: str,
     open_trade: Optional[OpenTrade],
-    reward_multiple: float = 2.5,
+    reward_multiple: float = 3.5,
+    *,
+    ema_fast: int = 20,
+    ema_mid: int = 50,
+    ema_slow: int = 100,
+    lookback_high: int = 50,
+    hybrid_down_half_as_r: float = 2.0,
+    hybrid_up_half_as_r: float = 2.0,
 ) -> EvalResult:
-    bar = bars[index]
-    closes = [b.c for b in bars]
-    volumes = [b.v for b in bars]
-    ema5_list = ema_series(closes, 5)
-    ema5 = ema5_list[index]
-    avg_vol = sma_at(volumes, index, filters.volLen)
+    """Stacked-EMA hybrid signal. Matches engine.mjs runStackedEma (beAtR=0).
 
-    # Manage open: EMA adverse close → exit at close (live/MOC intent)
-    if open_trade is not None and ema5 is not None:
-        if open_trade.side == "long" and bar.c < ema5:
-            return EvalResult(ema_exit_close=True)
-        if open_trade.side == "short" and bar.c > ema5:
-            return EvalResult(ema_exit_close=True)
-        return EvalResult()
-
+    Long down-bar hybrid: halfDist = (H50 - entry) / 2 as hybrid_down_half_as_r R-units.
+    Short up-bar hybrid: halfDist = (entry - L50) / 2 as hybrid_up_half_as_r R-units.
+    With-trend / doji: TP at 50H/50L, R = |TP-entry| / reward_multiple.
+    """
     if open_trade is not None:
+        # Bracket manages exits; no EMA(5) adverse tighten / flatten.
         return EvalResult()
 
+    bar = bars[index]
     if not session_ok(bar.ts):
         return EvalResult()
 
-    body = abs(bar.c - bar.o)
-    span = max(bar.h - bar.l, 0.25)
-    ratio_ok = (body / span) >= filters.bodyRatio
-    body_ok = body >= filters.minBody
-    vol_ok = bar.v > avg_vol * filters.volMult
-    if not (ratio_ok and body_ok and vol_ok):
+    ready = max(ema_slow, filters.volLen, lookback_high) + 1
+    if index < ready - 1:
         return EvalResult()
 
-    want_long = side_mode in ("long", "both") and bar.c > bar.o
-    want_short = side_mode in ("short", "both") and bar.c < bar.o
+    closes = [b.c for b in bars[: index + 1]]
+    volumes = [b.v for b in bars[: index + 1]]
+    ema_f = ema_series(closes, ema_fast)[index]
+    ema_m = ema_series(closes, ema_mid)[index]
+    ema_s = ema_series(closes, ema_slow)[index]
+    if ema_f is None or ema_m is None or ema_s is None:
+        return EvalResult()
+    if not (ema_f > 0 and ema_m > 0 and ema_s > 0):
+        return EvalResult()
 
-    # If both somehow qualify (shouldn't on same bar), prefer long.
-    if want_long:
-        risk = max(bar.c - bar.l, 1.0)
+    avg_vol = sma_at(volumes, index, filters.volLen)
+    if not (avg_vol > 0 and bar.v >= avg_vol * filters.volMult):
+        return EvalResult()
+
+    allow_long = side_mode in ("long", "both")
+    allow_short = side_mode in ("short", "both")
+    long_ok = allow_long and ema_f > ema_m and ema_m > ema_s
+    short_ok = allow_short and ema_f < ema_m and ema_m < ema_s
+    if long_ok and short_ok:
+        return EvalResult()
+    if not long_ok and not short_ok:
+        return EvalResult()
+
+    entry = bar.c
+    if long_ok:
+        h50 = lookback_high_inclusive(bars, index, lookback_high)
+        if not (h50 > entry):
+            return EvalResult()
+        if bar.c < bar.o and hybrid_down_half_as_r > 0:
+            # engine.mjs: halfDist = (H - C) / 2; TP = C + halfDist; R = halfDist / asR
+            half_dist = (h50 - entry) / 2.0
+            if not (half_dist >= TICK):
+                return EvalResult()
+            risk = half_dist / hybrid_down_half_as_r
+            if not (risk >= TICK):
+                return EvalResult()
+            tp = entry + half_dist
+            sl = entry - risk
+        else:
+            # up / doji / hybrid off
+            tp = h50
+            risk = (tp - entry) / reward_multiple
+            if not (risk >= TICK):
+                return EvalResult()
+            sl = entry - risk
         return EvalResult(
-            signal=Signal(
-                side="long",
-                stop=bar.l,
-                target=bar.c + risk * reward_multiple,
-                risk=risk,
-                entry=bar.c,
-            )
+            signal=Signal(side="long", stop=sl, target=tp, risk=risk, entry=entry)
         )
-    if want_short:
-        risk = max(bar.h - bar.c, 1.0)
-        return EvalResult(
-            signal=Signal(
-                side="short",
-                stop=bar.h,
-                target=bar.c - risk * reward_multiple,
-                risk=risk,
-                entry=bar.c,
-            )
-        )
-    return EvalResult()
+
+    # short_ok
+    l50 = lookback_low_inclusive(bars, index, lookback_high)
+    if not (l50 < entry):
+        return EvalResult()
+    if bar.c > bar.o and hybrid_up_half_as_r > 0:
+        half_dist = (entry - l50) / 2.0
+        if not (half_dist >= TICK):
+            return EvalResult()
+        risk = half_dist / hybrid_up_half_as_r
+        if not (risk >= TICK):
+            return EvalResult()
+        tp = entry - half_dist
+        sl = entry + risk
+    else:
+        tp = l50
+        risk = (entry - tp) / reward_multiple
+        if not (risk >= TICK):
+            return EvalResult()
+        sl = entry + risk
+    return EvalResult(
+        signal=Signal(side="short", stop=sl, target=tp, risk=risk, entry=entry)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -572,8 +650,15 @@ def replay_flip_locks(
     filters: Filters,
     side_mode: str,
     flip_lock_bars: int,
-    reward_multiple: float = 2.5,
+    reward_multiple: float = 3.5,
     entry_limit_expiry_bars: int = ENTRY_LIMIT_EXPIRY_BARS,
+    *,
+    ema_fast: int = 20,
+    ema_mid: int = 50,
+    ema_slow: int = 100,
+    lookback_high: int = 50,
+    hybrid_down_half_as_r: float = 2.0,
+    hybrid_up_half_as_r: float = 2.0,
 ) -> list[TsFlipLock]:
     """Rebuild stop locks from bars without placing orders.
 
@@ -592,17 +677,21 @@ def replay_flip_locks(
         if open_trade is not None and open_trade.entry_filled:
             exit_fill = resolve_exit_fill(bar, open_trade.side, open_trade.stop, open_trade.target)
             if exit_fill is None:
-                managed = evaluate_bar(
-                    bars, index, filters, side_mode, open_trade, reward_multiple
+                # Stacked-EMA hybrid: no EMA tighten/flatten while open.
+                evaluate_bar(
+                    bars,
+                    index,
+                    filters,
+                    side_mode,
+                    open_trade,
+                    reward_multiple,
+                    ema_fast=ema_fast,
+                    ema_mid=ema_mid,
+                    ema_slow=ema_slow,
+                    lookback_high=lookback_high,
+                    hybrid_down_half_as_r=hybrid_down_half_as_r,
+                    hybrid_up_half_as_r=hybrid_up_half_as_r,
                 )
-                if managed.ema_exit_close:
-                    # Count as target exit for flip-lock (does not arm stop lock).
-                    arm_stop_flip_lock(locks, n, bar.ts, open_trade.side, "target")
-                    open_trade = None
-                    continue
-                if managed.tighten_target is not None and not open_trade.tightened:
-                    open_trade.target = managed.tighten_target
-                    open_trade.tightened = True
                 continue
             _price, reason = exit_fill
             arm_stop_flip_lock(locks, n, bar.ts, open_trade.side, reason)
@@ -630,7 +719,20 @@ def replay_flip_locks(
 
         if open_trade is not None:
             continue
-        result = evaluate_bar(bars, index, filters, side_mode, None, reward_multiple)
+        result = evaluate_bar(
+            bars,
+            index,
+            filters,
+            side_mode,
+            None,
+            reward_multiple,
+            ema_fast=ema_fast,
+            ema_mid=ema_mid,
+            ema_slow=ema_slow,
+            lookback_high=lookback_high,
+            hybrid_down_half_as_r=hybrid_down_half_as_r,
+            hybrid_up_half_as_r=hybrid_up_half_as_r,
+        )
         if result.signal is None:
             continue
         if signal_flip_locked(locks, bars, result.signal.side, index, n) is not None:
@@ -720,7 +822,8 @@ class PaperLoop:
         ib.errorEvent += _on_error
         Log.info(
             "PAPER ONLY. Connecting %s:%s clientId=%s place_orders=%s dry_run=%s "
-            "flipLockBars=%s effective=%s side=%s",
+            "flipLockBars=%s effective=%s side=%s strategy=%s "
+            "EMA%s/%s/%s vol=%sx%s hybrid reward=%sR downAsR=%s upAsR=%s lookback=%s",
             self.cfg.ibHost,
             self.cfg.ibPort,
             self.cfg.clientId,
@@ -729,6 +832,16 @@ class PaperLoop:
             self.cfg.flipLockBars,
             self.flip_lock_bars,
             self.cfg.side,
+            self.cfg.strategy,
+            self.cfg.emaFast,
+            self.cfg.emaMid,
+            self.cfg.emaSlow,
+            self.cfg.filters.volLen,
+            self.cfg.filters.volMult,
+            self.cfg.rewardMultiple,
+            self.cfg.hybridDownHalfAsR,
+            self.cfg.hybridUpHalfAsR,
+            self.cfg.lookbackHigh,
         )
         ib.connect(
             self.cfg.ibHost,
@@ -1090,6 +1203,7 @@ class PaperLoop:
         if self.flip_lock_bars <= 0:
             self.state.flip_locks = []
             Log.info("Flip lock off (bars=%s side=%s)", self.cfg.flipLockBars, self.cfg.side)
+            save_state(self.state)
             return
         seeded = replay_flip_locks(
             self.bars,
@@ -1098,6 +1212,12 @@ class PaperLoop:
             self.cfg.flipLockBars,
             self.cfg.rewardMultiple,
             self.cfg.entryLimitExpiryBars,
+            ema_fast=self.cfg.emaFast,
+            ema_mid=self.cfg.emaMid,
+            ema_slow=self.cfg.emaSlow,
+            lookback_high=self.cfg.lookbackHigh,
+            hybrid_down_half_as_r=self.cfg.hybridDownHalfAsR,
+            hybrid_up_half_as_r=self.cfg.hybridUpHalfAsR,
         )
         for lock in seeded:
             arm_stop_flip_lock(self.state.flip_locks, self.flip_lock_bars, lock.exit_ts, lock.stop_side, "stop")
@@ -1155,7 +1275,7 @@ class PaperLoop:
                 save_state(self.state)
             return
 
-        # Pass open only when filled so EMA exit does not run on a resting entry.
+        # Pass open only when filled (hybrid leaves management to bracket TP/SL).
         open_for_eval = self.state.open if (self.state.open and self.state.open.entry_filled) else None
         result = evaluate_bar(
             self.bars,
@@ -1164,13 +1284,19 @@ class PaperLoop:
             self.cfg.side,
             open_for_eval,
             self.cfg.rewardMultiple,
+            ema_fast=self.cfg.emaFast,
+            ema_mid=self.cfg.emaMid,
+            ema_slow=self.cfg.emaSlow,
+            lookback_high=self.cfg.lookbackHigh,
+            hybrid_down_half_as_r=self.cfg.hybridDownHalfAsR,
+            hybrid_up_half_as_r=self.cfg.hybridUpHalfAsR,
         )
         pos = "flat" if self.state.open is None else f"{self.state.open.side}@{self.state.open.entry}"
         self._log_bar(source, ct, bar, pos)
 
         if result.ema_exit_close and self.state.open and self.state.open.entry_filled:
             Log.info(
-                "EMA EXIT %s @ close %.2f (market/MOC)",
+                "EMA EXIT %s @ close %.2f (already ≥1R; market/MOC)",
                 self.state.open.side,
                 bar.c,
             )
@@ -1179,6 +1305,27 @@ class PaperLoop:
                 return
             if not self._flatten_market_ema(float(bar.c), int(bar.ts)):
                 Log.warning("EMA EXIT market flatten failed; will retry next bar")
+            return
+
+        if result.tighten_target is not None and self.state.open and self.state.open.entry_filled:
+            new_tp = round_to_tick(result.tighten_target, self._tick)
+            Log.info(
+                "TIGHTEN %s target %.2f -> %.2f (1R)",
+                self.state.open.side,
+                self.state.open.target,
+                new_tp,
+            )
+            if self.place_orders and not self._modify_take_profit(new_tp):
+                # IB still has the previous limit. Leaving tightened false
+                # lets a later bar retry. Do not pretend the TP moved.
+                Log.warning(
+                    "TIGHTEN not applied %s IB target stays %.2f",
+                    self.state.open.side,
+                    self.state.open.target,
+                )
+                return
+            self.state.open.target = new_tp
+            self.state.open.tightened = True
             return
 
         if result.signal is None:
@@ -1897,7 +2044,7 @@ class PaperLoop:
 
 def parse_args() -> argparse.Namespace:
     cfg = load_config()
-    p = argparse.ArgumentParser(description="MNQ IBKR Paper 1m impulse loop")
+    p = argparse.ArgumentParser(description="MNQ IBKR Paper 1m stacked-EMA hybrid loop")
     p.add_argument("--host", default=cfg.ibHost)
     p.add_argument("--port", type=int, default=cfg.ibPort)
     p.add_argument("--client-id", type=int, default=cfg.clientId)

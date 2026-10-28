@@ -42,15 +42,16 @@ export type EntryFilters = {
 };
 
 export const DEFAULT_ENTRY_FILTERS: EntryFilters = {
-  bodyRatio: 0.45,
-  minBody: 2,
-  volLen: 15,
-  volMult: 1.2,
+  bodyRatio: 0,
+  minBody: 0,
+  volLen: 10,
+  volMult: 1.8,
 };
 
 /**
  * vstrict filters for the parked evening candidate.
- * The daytime default stays on DEFAULT_ENTRY_FILTERS.
+ * Daytime stacked-EMA hybrid uses vol only (bodyRatio/minBody 0 = off).
+ * Eve still uses EVE_ENTRY_FILTERS.
  */
 export const EVE_ENTRY_FILTERS: EntryFilters = {
   bodyRatio: 0.7,
@@ -64,7 +65,7 @@ export const STRATEGY_PRESET_STORAGE_KEY = "mnq-replay.strategyPreset";
 export type StrategyPresetId = "day" | "eve";
 
 export const STRATEGY_PRESETS: { id: StrategyPresetId; label: string }[] = [
-  { id: "day", label: "Daytime 09:00–20:29 (default)" },
+  { id: "day", label: "Daytime stacked-EMA hybrid (default)" },
   { id: "eve", label: "Eve 20:30–23:59 · stop2 asym · 2.5R+EMA" },
 ];
 
@@ -78,8 +79,8 @@ function clampFilters(raw: Partial<EntryFilters> | null | undefined): EntryFilte
     const n = typeof value === "number" ? value : Number(value);
     return Number.isFinite(n) ? n : fallback;
   };
-  const bodyRatio = Math.min(1, Math.max(0.05, num(raw?.bodyRatio, base.bodyRatio)));
-  const minBody = Math.min(200, Math.max(0.25, num(raw?.minBody, base.minBody)));
+  const bodyRatio = Math.min(1, Math.max(0, num(raw?.bodyRatio, base.bodyRatio)));
+  const minBody = Math.min(200, Math.max(0, num(raw?.minBody, base.minBody)));
   const volLen = Math.min(200, Math.max(2, Math.round(num(raw?.volLen, base.volLen))));
   const volMult = Math.min(20, Math.max(0.1, num(raw?.volMult, base.volMult)));
   return { bodyRatio, minBody, volLen, volMult };
@@ -137,62 +138,89 @@ const sessionOk = ctMins >= 9 * 60 && ctMins < 21 * 60 - 30 && !(ctWd === "Fri" 
 
 export function buildLongStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FILTERS): string {
   const f = clampFilters(filters);
-  return `// MNQ 1-minute strategy. This runs in the browser on each bar.
-// bar: { ts, o, h, l, c, v }
-// ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
-// position: null, or { side, entry, stop, target, risk } while a trade is open
-// Return { signal: true, side, stop, target } to enter, { exit: true } to leave at close, { target } to schedule next-bar TP, or null.
-// Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close below the 5 EMA exits at that bar's close (market/MOC).
-// New longs only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
-// Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
-
-const ema5 = ta.ema(i, 5, "c")
-if (position && position.side === "long" && bar.c < ema5) {
-  return { exit: true }
-}
+  return `// PRESET=stacked-ema-hybrid
+// MNQ 1-minute stacked-EMA hybrid LONG (matches Paper / engine.mjs).
+// bar: { ts, o, h, l, c, v } · ta.sma / ta.ema · bars[i]
+// Entry: limit @ signal close; expires after 2 completed 1m bars; cancel if SL touched before fill.
+// Long when EMA20 > EMA50 > EMA100 and vol >= SMA(${f.volLen}) * ${f.volMult} (incl current). No body/impulse filter.
+// Hybrid R: up/doji → TP=50-bar high (incl signal), R=(TP-C)/3.5, SL=C-R.
+//   down (c<o) → halfDist=(H50-C)/2 as 2R → TP=C+halfDist, R=halfDist/2, SL=C-R.
+// No EMA5 tighten / market flatten. Session-end flatten outside CT day window (engine).
+// New longs only America/Chicago 09:00–20:29; Fri no new entries from 14:45 CT.
+// Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol >= SMA(${f.volLen}) * ${f.volMult}
 
 // SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
 ${DAY_SESSION_SNIPPET}
+if (position) return null
+if (!sessionOk) return null
+const ema20 = ta.ema(i, 20, "c")
+const ema50 = ta.ema(i, 50, "c")
+const ema100 = ta.ema(i, 100, "c")
+if (!(ema20 > 0 && ema50 > 0 && ema100 > 0)) return null
+if (!(ema20 > ema50 && ema50 > ema100)) return null
 const avgVol = ta.sma(i, ${f.volLen}, "v")
-const body = Math.abs(bar.c - bar.o)
-const span = Math.max(bar.h - bar.l, 0.25)
-if (!position && sessionOk && bar.c > bar.o && body / span >= ${f.bodyRatio} && body >= ${f.minBody} && bar.v > avgVol * ${f.volMult}) {
-  const risk = Math.max(bar.c - bar.l, 1)
-  return { signal: true, side: "long", stop: bar.l, target: bar.c + risk * 2.5 }
+if (!(avgVol > 0 && bar.v >= avgVol * ${f.volMult})) return null
+const entry = bar.c
+let h50 = -Infinity
+const lookStart = Math.max(0, i - 49)
+for (let j = lookStart; j <= i; j++) if (bars[j].h > h50) h50 = bars[j].h
+if (!(h50 > entry)) return null
+const TICK = 0.25
+if (bar.c < bar.o) {
+  const halfDist = (h50 - entry) / 2
+  if (!(halfDist >= TICK)) return null
+  const risk = halfDist / 2
+  if (!(risk >= TICK)) return null
+  return { signal: true, side: "long", stop: entry - risk, target: entry + halfDist, risk }
 }
-return null
+const target = h50
+const risk = (target - entry) / 3.5
+if (!(risk >= TICK)) return null
+return { signal: true, side: "long", stop: entry - risk, target, risk }
 `;
 }
 
 export function buildShortStrategyScript(filters: EntryFilters = DEFAULT_ENTRY_FILTERS): string {
   const f = clampFilters(filters);
-  return `// MNQ 1-minute strategy. This runs in the browser on each bar.
-// Inverse of the default long impulse: short a bearish impulse.
-// bar: { ts, o, h, l, c, v }
-// ta.sma / ta.ema(i, length, "o" | "h" | "l" | "c" | "v")
-// position: null, or { side, entry, stop, target, risk } while a trade is open
-// Return { signal: true, side, stop, target } to enter, { exit: true } to leave at close, { target } to schedule next-bar TP, or null.
-// Entry is a limit at the signal close; expires after 2 completed 1m bars if unfilled. One position at a time.
-// Impulse entries still target 2.5R. A close above the 5 EMA exits at that bar's close (market/MOC).
-// New shorts only America/Chicago 09:00–20:29 (session close 21:00; no new entries last 30 min); Fri no new entries from 14:45 CT. Open trades still manage/exit.
-// Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol > SMA(${f.volLen}) * ${f.volMult}
-
-const ema5 = ta.ema(i, 5, "c")
-if (position && position.side === "short" && bar.c > ema5) {
-  return { exit: true }
-}
+  return `// PRESET=stacked-ema-hybrid
+// MNQ 1-minute stacked-EMA hybrid SHORT (mirror of long; matches Paper / engine.mjs).
+// bar: { ts, o, h, l, c, v } · ta.sma / ta.ema · bars[i]
+// Entry: limit @ signal close; expires after 2 completed 1m bars; cancel if SL touched before fill.
+// Short when EMA20 < EMA50 < EMA100 and vol >= SMA(${f.volLen}) * ${f.volMult} (incl current). No body/impulse filter.
+// Hybrid R: down/doji → TP=50-bar low (incl signal), R=(C-TP)/3.5, SL=C+R.
+//   up (c>o) → halfDist=(C-L50)/2 as 2R → TP=C-halfDist, R=halfDist/2, SL=C+R.
+// No EMA5 tighten / market flatten. Session-end flatten outside CT day window (engine).
+// New shorts only America/Chicago 09:00–20:29; Fri no new entries from 14:45 CT.
+// Filters: body/range >= ${f.bodyRatio}, body >= ${f.minBody}, vol >= SMA(${f.volLen}) * ${f.volMult}
 
 // SESSION_START=09:00 CT, SESSION_END=21:00 CT, ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE=30 → last new entry before 20:30 CT; FRIDAY_ENTRY_CUTOFF=14:45 CT (no new entries Fri >= 14:45)
 ${DAY_SESSION_SNIPPET}
+if (position) return null
+if (!sessionOk) return null
+const ema20 = ta.ema(i, 20, "c")
+const ema50 = ta.ema(i, 50, "c")
+const ema100 = ta.ema(i, 100, "c")
+if (!(ema20 > 0 && ema50 > 0 && ema100 > 0)) return null
+if (!(ema20 < ema50 && ema50 < ema100)) return null
 const avgVol = ta.sma(i, ${f.volLen}, "v")
-const body = Math.abs(bar.c - bar.o)
-const span = Math.max(bar.h - bar.l, 0.25)
-if (!position && sessionOk && bar.c < bar.o && body / span >= ${f.bodyRatio} && body >= ${f.minBody} && bar.v > avgVol * ${f.volMult}) {
-  const risk = Math.max(bar.h - bar.c, 1)
-  return { signal: true, side: "short", stop: bar.h, target: bar.c - risk * 2.5 }
+if (!(avgVol > 0 && bar.v >= avgVol * ${f.volMult})) return null
+const entry = bar.c
+let l50 = Infinity
+const lookStart = Math.max(0, i - 49)
+for (let j = lookStart; j <= i; j++) if (bars[j].l < l50) l50 = bars[j].l
+if (!(l50 < entry)) return null
+const TICK = 0.25
+if (bar.c > bar.o) {
+  const halfDist = (entry - l50) / 2
+  if (!(halfDist >= TICK)) return null
+  const risk = halfDist / 2
+  if (!(risk >= TICK)) return null
+  return { signal: true, side: "short", stop: entry + risk, target: entry - halfDist, risk }
 }
-return null
+const target = l50
+const risk = (entry - target) / 3.5
+if (!(risk >= TICK)) return null
+return { signal: true, side: "short", stop: entry + risk, target, risk }
 `;
 }
 
@@ -214,7 +242,6 @@ function buildEveLegScript(side: "long" | "short", filters: EntryFilters): strin
   const stopExpr = bearish ? "bar.c + risk1 * 2" : "bar.c - risk1 * 2";
   const targetExpr = bearish ? "bar.c - risk1 * 2.5" : "bar.c + risk1 * 2.5";
   const emaCmp = bearish ? "bar.c > ema5" : "bar.c < ema5";
-  const emaTarget = bearish ? "position.entry - position.risk" : "position.entry + position.risk";
   const impulseCmp = bearish ? "<" : ">";
   const extremeName = bearish ? "high" : "low";
   return `// PRESET=eve-2030-2359
@@ -260,7 +287,16 @@ export const EVE_SHORT_STRATEGY_SCRIPT = buildEveShortStrategyScript();
 export function isStaleDefaultScript(script: string) {
   // The evening candidate is its own preset, not an outdated daytime default.
   if (script.includes("PRESET=eve-2030-2359")) return false;
+  // Current daytime default.
+  if (script.includes("PRESET=stacked-ema-hybrid")) return false;
   if (script === LEGACY_DEFAULT_STRATEGY_SCRIPT || script === EMA_EXIT_DEFAULT_STRATEGY_SCRIPT) {
+    return true;
+  }
+  // Pre-hybrid daytime impulse (+ optional EMA5 manage) → upgrade to stacked-EMA hybrid.
+  if (script.includes("Impulse entries still target")) {
+    return true;
+  }
+  if (script.includes('const ema5 = ta.ema(i, 5, "c")') && script.includes("FRIDAY_ENTRY_CUTOFF")) {
     return true;
   }
   // Pre-2.5R defaults (including prior session cutoffs): still say target 2R.
@@ -517,6 +553,8 @@ type StrategyLeg = {
   pending: PendingEntry | null;
   /** EMA→1R (or script target) scheduled on a prior bar; applied at bar start. */
   pendingTightenTarget: number | null;
+  /** Stacked-EMA hybrid daytime: session-end flatten + shared one-position busy. */
+  hybrid: boolean;
 };
 
 /** Append a lock when a trade exits on a full stop. Target exits and `flipLockBars <= 0` do nothing. */
@@ -564,7 +602,7 @@ function accelerateSession(source: string): string {
 }
 
 const FILTER_NUMBERS =
-  /body\/range >= ([0-9.]+), body >= ([0-9.]+), vol > SMA\(([0-9]+)\) \* ([0-9.]+)/;
+  /body\/range >= ([0-9.]+), body >= ([0-9.]+), vol (?:>|>=) SMA\(([0-9]+)\) \* ([0-9.]+)/;
 
 function classifyGeneratedLeg(id: string, source: string): FastLeg | null {
   const match = FILTER_NUMBERS.exec(source);
@@ -686,9 +724,10 @@ export function runLinkedStrategyScripts(
   const sources = specs.map((spec) =>
     options.forceInterpreter ? spec.source : accelerateSession(spec.source),
   );
-  const sessions = sources.some((source, index) => source !== specs[index]?.source)
-    ? sessionMasks(bars)
-    : null;
+  const needsSessionMask =
+    sources.some((source, index) => source !== specs[index]?.source) ||
+    specs.some((spec) => spec.source.includes("PRESET=stacked-ema-hybrid"));
+  const sessions = needsSessionMask ? sessionMasks(bars) : null;
 
   const legs: StrategyLeg[] = [];
   for (let specIndex = 0; specIndex < specs.length; specIndex += 1) {
@@ -704,6 +743,7 @@ export function runLinkedStrategyScripts(
         open: null,
         pending: null,
         pendingTightenTarget: null,
+        hybrid: spec.source.includes("PRESET=stacked-ema-hybrid"),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Script failed to compile.";
@@ -765,11 +805,22 @@ export function runLinkedStrategyScripts(
     };
   };
 
+  const hybridBusy = () =>
+    legs.some((leg) => leg.hybrid && (leg.open !== null || leg.pending !== null));
+
   for (let i = 0; i < bars.length; i += 1) {
     const bar = bars[i];
+    const dayOk = sessions !== null ? sessions.day[i] === 1 : true;
     for (const leg of legs) {
       if (leg.open !== null) {
         const pos = leg.open;
+        // Hybrid daytime: flatten outside CT day session (gap avoidance; matches Paper).
+        if (leg.hybrid && !dayOk) {
+          pushExit(leg, pos, i, { price: bar.c, reason: "stop" });
+          leg.open = null;
+          leg.pendingTightenTarget = null;
+          continue;
+        }
         // Apply a prior scheduled TP tighten before this bar's exits.
         if (leg.pendingTightenTarget !== null) {
           pos.targetPrice = leg.pendingTightenTarget;
@@ -815,10 +866,29 @@ export function runLinkedStrategyScripts(
 
       if (leg.pending !== null) {
         const pending = leg.pending;
+        if (leg.hybrid && !dayOk) {
+          leg.pending = null;
+          continue;
+        }
+        // Hybrid: cancel if SL touched before fill (Paper / engine.mjs).
+        if (leg.hybrid) {
+          const stopTouched =
+            pending.side === "long"
+              ? bar.o <= pending.stop || bar.l <= pending.stop
+              : bar.o >= pending.stop || bar.h >= pending.stop;
+          if (stopTouched) {
+            leg.pending = null;
+            continue;
+          }
+        }
         const fill = resolveEntryLimitFill(bar, pending.side, pending.limit, pending.stop);
         if (fill !== null) {
           const pos = makeOpen(leg, i, fill, pending);
           leg.pending = null;
+          if (leg.hybrid && !dayOk) {
+            pushExit(leg, pos, i, { price: bar.c, reason: "stop" });
+            continue;
+          }
           const exit = resolveExitFill(bar, pos.side, pos.stopPrice, pos.targetPrice);
           if (exit) {
             pushExit(leg, pos, i, exit);
@@ -853,6 +923,8 @@ export function runLinkedStrategyScripts(
         }
         continue;
       }
+
+      if (leg.hybrid && hybridBusy()) continue;
 
       let result: unknown;
       try {

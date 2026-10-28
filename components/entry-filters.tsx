@@ -27,7 +27,7 @@ const FIELDS: Field[] = [
     label: "Body / range",
     help: "實體佔波幅比例",
     step: 0.05,
-    min: 0.05,
+    min: 0,
     max: 1,
   },
   {
@@ -35,7 +35,7 @@ const FIELDS: Field[] = [
     label: "Min body pts",
     help: "最少實體點數",
     step: 0.25,
-    min: 0.25,
+    min: 0,
     max: 200,
   },
   {
@@ -125,7 +125,7 @@ export function EntryFiltersPanel({
             {locked
               ? (lockedNote ??
                 "This preset bakes its filters into the script. Switch to Daytime to edit the default.")
-              : "改數字後撳 Save 先套用到 Long／Short 預設腳本、手續費同 flip lock（session + 5 EMA 不變）· body ≥ ratio · body pts · vol > SMA × mult · round-trip fee · 止蝕後封鎖對面新倉"}
+              : "Stacked-EMA hybrid：改 Vol SMA／Vol× 後撳 Save（body 兩欄留 0＝關閉，唔用 impulse）。手續費同 flip lock 照舊。Session／EMA20·50·100／3.5R hybrid 寫死喺腳本。"}
             {(locked ? feeDraft !== feeUsd : dirty) ? (
               <span className="ml-1 text-amber-300/90">· unsaved</span>
             ) : null}

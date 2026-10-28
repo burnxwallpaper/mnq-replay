@@ -210,12 +210,22 @@ class TakeProfitModifyTest(unittest.TestCase):
         self.runner.state.open.position_seen = True
 
     def _eval(self) -> str:
-        with self.assertLogs("ib_paper_loop", level="INFO") as logs:
-            self.runner._heartbeat_eval(7, source="test", allow_order=True)
+        # Hybrid strategy no longer emits EMA tighten; inject for TP-modify plumbing tests.
+        def _fake_eval(*_a, **_k):
+            return loop.EvalResult(tighten_target=110.0)
+
+        prev = loop.evaluate_bar
+        loop.evaluate_bar = _fake_eval  # type: ignore[assignment]
+        try:
+            with self.assertLogs("ib_paper_loop", level="INFO") as logs:
+                self.runner._heartbeat_eval(7, source="test", allow_order=True)
+        finally:
+            loop.evaluate_bar = prev  # type: ignore[assignment]
         return "\n".join(logs.output)
 
     def test_ema_tighten_submits_a_price_only_modify(self) -> None:
         assert self.runner.state.open is not None
+        # Stacked-EMA hybrid does not set tighten; plumbing still accepts injected target.
         preview = loop.evaluate_bar(
             self.bars,
             7,
@@ -224,7 +234,7 @@ class TakeProfitModifyTest(unittest.TestCase):
             self.runner.state.open,
             self.runner.cfg.rewardMultiple,
         )
-        self.assertEqual(preview.tighten_target, 110.0)
+        self.assertIsNone(preview.tighten_target)
 
         text = self._eval()
         self.assertIn("TIGHTEN long target 125.00 -> 110.00 (1R)", text)
@@ -357,8 +367,15 @@ class TakeProfitModifyTest(unittest.TestCase):
         runner.state.open.simulated = True
         self.gateway.submitted.clear()
         self.gateway.cancelled.clear()
-        with self.assertLogs("ib_paper_loop", level="INFO") as logs:
-            runner._heartbeat_eval(7, source="test", allow_order=True)
+        def _fake_eval(*_a, **_k):
+            return loop.EvalResult(tighten_target=110.0)
+        prev = loop.evaluate_bar
+        loop.evaluate_bar = _fake_eval  # type: ignore[assignment]
+        try:
+            with self.assertLogs("ib_paper_loop", level="INFO") as logs:
+                runner._heartbeat_eval(7, source="test", allow_order=True)
+        finally:
+            loop.evaluate_bar = prev  # type: ignore[assignment]
         text = "\n".join(logs.output)
         self.assertIn("TIGHTEN long target 125.00 -> 110.00 (1R)", text)
         self.assertNotIn("Modified TP order", text)
