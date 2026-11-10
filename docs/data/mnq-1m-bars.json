@@ -6,8 +6,8 @@
       "id": "recent",
       "url": "data/mnq-1m-recent.json",
       "label": "Last 90 days · 88k bars",
-      "from": 1786409760,
-      "to": 1794185760,
+      "from": 1786496160,
+      "to": 1794272160,
       "bars": 88021
     },
     {
@@ -53,18 +53,18 @@
     {
       "id": "2026",
       "url": "data/mnq-1m-bars-2026.json",
-      "label": "2026 · 303k bars",
+      "label": "2026 · 305k bars",
       "from": 1767308400,
-      "to": 1794185760,
-      "bars": 303192
+      "to": 1794272160,
+      "bars": 304572
     },
     {
       "id": "full",
       "url": "",
       "label": "Full history · 2.07M bars",
       "from": 1609714800,
-      "to": 1794185760,
-      "bars": 2071892,
+      "to": 1794272160,
+      "bars": 2073272,
       "parts": [
         "2021",
         "2022",
