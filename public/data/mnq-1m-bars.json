@@ -1,3 +1,78 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:5ad7a34592a8e13c2dfda1c8bd8b8030bab32c660fb60c0f5d0faca9c5932b00
-size 1651
+{
+  "format": "mnq-1m-pack-v1",
+  "defaultPack": "recent",
+  "packs": [
+    {
+      "id": "recent",
+      "url": "data/mnq-1m-recent.json",
+      "label": "Last 90 days · 88k bars",
+      "from": 1786582740,
+      "to": 1794358740,
+      "bars": 88021
+    },
+    {
+      "id": "2021",
+      "url": "data/mnq-1m-bars-2021.json",
+      "label": "2021 · 353k bars",
+      "from": 1609714800,
+      "to": 1640987940,
+      "bars": 353470
+    },
+    {
+      "id": "2022",
+      "url": "data/mnq-1m-bars-2022.json",
+      "label": "2022 · 354k bars",
+      "from": 1641164400,
+      "to": 1672437540,
+      "bars": 354134
+    },
+    {
+      "id": "2023",
+      "url": "data/mnq-1m-bars-2023.json",
+      "label": "2023 · 353k bars",
+      "from": 1672700400,
+      "to": 1703887140,
+      "bars": 353444
+    },
+    {
+      "id": "2024",
+      "url": "data/mnq-1m-bars-2024.json",
+      "label": "2024 · 355k bars",
+      "from": 1704150000,
+      "to": 1735682340,
+      "bars": 355065
+    },
+    {
+      "id": "2025",
+      "url": "data/mnq-1m-bars-2025.json",
+      "label": "2025 · 353k bars",
+      "from": 1735772400,
+      "to": 1767218340,
+      "bars": 352587
+    },
+    {
+      "id": "2026",
+      "url": "data/mnq-1m-bars-2026.json",
+      "label": "2026 · 306k bars",
+      "from": 1767308400,
+      "to": 1794358740,
+      "bars": 305955
+    },
+    {
+      "id": "full",
+      "url": "",
+      "label": "Full history · 2.07M bars",
+      "from": 1609714800,
+      "to": 1794358740,
+      "bars": 2074655,
+      "parts": [
+        "2021",
+        "2022",
+        "2023",
+        "2024",
+        "2025",
+        "2026"
+      ]
+    }
+  ]
+}
